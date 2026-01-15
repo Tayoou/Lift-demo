@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Preview Sandbox</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: { extend: { colors: { clifford: "#da373d" } } },
+      };
+    </script>
+
+    <script
+      crossorigin
+      src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script
+      crossorigin
+      src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+        background-color: #ffffff;
+      }
+      #root {
+        width: 100%;
+        min-height: 100vh;
+      }
+      .error-box {
+        padding: 1rem;
+        background-color: #fee2e2;
+        color: #b91c1c;
+        border: 1px solid #f87171;
+        border-radius: 0.5rem;
+        margin: 1rem;
+        font-family: monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script>
+      const rootElement = document.getElementById("root");
+      let reactRoot = null;
+
+      // 🔥 关键修复 1: 把 React 的所有 Hook 注入到全局
+      // 这样用户代码里的 useState() 就能直接运行，而不需要写 React.useState()
+      if (window.React) {
+        Object.keys(window.React).forEach((key) => {
+          window[key] = window.React[key];
+        });
+      }
+
+      window.addEventListener("message", (event) => {
+        const { type, code } = event.data;
+        if (type === "RENDER") {
+          // 这里加一个简单的防抖或延迟，确保 Babel 加载完成
+          if (typeof Babel === "undefined") {
+            setTimeout(() => window.postMessage(event.data, "*"), 100);
+            return;
+          }
+          renderCode(code);
+        }
+      });
+
+      function renderCode(rawCode) {
+        try {
+          // 清除旧错误
+          // rootElement.innerHTML = ""; // 这一行先注释掉，让 React 自己处理重绘
+
+          // 1. 代码清洗
+          let processedCode = rawCode
+            .replace(/import\s+.*?from\s+['"].*?['"];?/g, "") // 删 import
+            .replace(/export\s+default\s+/g, ""); // 删 export default
+
+          // 2. 智能修正：确保组件有名字
+          // 很多时候 AI 写 const ProductFeatureCard = ... 我们需要捕获这个名字
+          // 或者如果是 function App() ...
+
+          // 我们构建一个包裹脚本，不仅执行代码，还负责把组件挂载出来
+          // 🔥 关键修复 2: 不再让 eval 返回组件，而是让 eval 内部直接定义变量
+          const codeToRun = `
+            // 运行用户的代码
+            ${processedCode}
+
+            // --- 下面是自动查找组件的逻辑 ---
+            // 优先级：App > ProductFeatureCard > 第一个找到的函数组件
+            let TargetComponent = null;
+
+            if (typeof App !== 'undefined') TargetComponent = App;
+            else if (typeof ProductFeatureCard !== 'undefined') TargetComponent = ProductFeatureCard;
+            else if (typeof Component !== 'undefined') TargetComponent = Component;
+            else {
+                // 此时代码已经执行，尝试找任何可能的组件名
+                // 这里我们假设 AI 通常会用这几个名字，如果没有，后续可以加更复杂的遍历 window 逻辑
+            }
+            
+            TargetComponent; // 返回给 eval
+          `;
+
+          // 3. Babel 编译
+          const compiledCode = Babel.transform(codeToRun, {
+            presets: ["react"],
+          }).code;
+
+          // 4. 执行并获取组件
+          const Component = eval(compiledCode);
+
+          if (!Component) {
+            throw new Error(
+              "无法找到可渲染的组件。请确保代码中定义了 'App' 或 'ProductFeatureCard' 组件。"
+            );
+          }
+
+          // 5. 挂载 React
+          if (!reactRoot) {
+            reactRoot = ReactDOM.createRoot(rootElement);
+          }
+          reactRoot.render(React.createElement(Component));
+        } catch (err) {
+          console.error("Preview Render Error:", err);
+          rootElement.innerHTML = `<div class="error-box"><strong>渲染错误:</strong><br/>${err.message}<br/><br/>(请检查控制台获取详细堆栈)</div>`;
+        }
+      }
+    </script>
+  </body>
+</html>

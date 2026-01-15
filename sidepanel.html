@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <style>
+      /* 简单的 Tailwind 风格样式，让 Demo 看起来专业 */
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          sans-serif;
+        background: #f8fafc;
+        color: #334155;
+        height: 100vh;
+        overflow: hidden;
+      }
+      .container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+
+      /* 顶部色板区 (重构为 Header + Controls) */
+      .header {
+        padding: 12px 16px;
+        border-bottom: 1px solid #e2e8f0;
+        background: white;
+        flex-shrink: 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      .header-left {
+        flex: 1;
+      }
+      .title {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 8px;
+        color: #64748b;
+      }
+      .palette {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .color-dot {
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        cursor: pointer;
+        transition: transform 0.1s;
+      }
+      .color-dot:hover {
+        transform: scale(1.1);
+      }
+
+      /* 右上角切换按钮组 */
+      .view-controls {
+        display: flex;
+        background: #f1f5f9;
+        padding: 2px;
+        border-radius: 6px;
+        border: 1px solid #e2e8f0;
+      }
+      .view-btn {
+        padding: 4px 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #64748b;
+        cursor: pointer;
+        border: none;
+        background: transparent;
+        border-radius: 4px;
+        transition: all 0.2s;
+      }
+      .view-btn.active {
+        background: white;
+        color: #3b82f6;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      }
+
+      /* 内容区域 */
+      .content-area {
+        flex: 1;
+        overflow: hidden;
+        position: relative;
+        background: #f1f5f9;
+      }
+
+      /* 预览面板 */
+      #preview-panel {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: none;
+      }
+      #preview-panel.active {
+        display: block;
+      }
+      /* Shadow DOM 容器 */
+      #preview-container {
+        width: 100%;
+        height: 100%;
+        background: white;
+        border: none;
+      }
+
+      /* 代码面板 */
+      #code-panel {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: none;
+        background: #1e293b;
+      }
+      #code-panel.active {
+        display: flex;
+        flex-direction: column;
+      }
+      .code-scroller {
+        flex: 1;
+        overflow: auto;
+        padding: 16px;
+      }
+      .code-block {
+        font-family: "Menlo", "Monaco", "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #e2e8f0;
+        /* 修复换行问题：使用 pre-wrap 允许自动换行，避免横向滚动过长；保持代码格式 */
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="header-left">
+          <div class="title">Detected Palette</div>
+          <div id="palette-container" class="palette">
+            <div style="color: #94a3b8; font-size: 12px">Select element...</div>
+          </div>
+        </div>
+
+        <!-- 右上角切换按钮 -->
+        <div class="view-controls">
+          <button class="view-btn active" data-target="preview-panel">
+            Preview
+          </button>
+          <button class="view-btn" data-target="code-panel">Code</button>
+        </div>
+      </div>
+
+      <div class="content-area">
+        <!-- 预览面板 -->
+        <div id="preview-panel" class="active">
+          <!-- 改用 Iframe 加载 Sandbox -->
+          <iframe
+            id="preview-iframe"
+            src="preview.html"
+            style="width: 100%; height: 100%; border: none"></iframe>
+        </div>
+
+        <!-- 代码面板 -->
+        <div id="code-panel">
+          <div class="code-scroller">
+            <pre id="code-editor" class="code-block">
+// Waiting for capture...</pre
+            >
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
