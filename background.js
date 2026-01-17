@@ -65,7 +65,7 @@ async function handleGeminiTestStream(msg, port) {
 Task: Convert the provided **Augmented HTML** into a React component.
 Goal: 100% visual fidelity.
 
-DATA CONTEXT:
+🚨 DATA CONTEXT:
 The input was captured in a **FORCED HOVER STATE**.
 - **Inline \`style\`**: Represents the element's FINAL state (including hover effects).
 - **\`data-matched-rules\`**: Contains the transition logic.
@@ -102,7 +102,7 @@ ${stylesData}`;
   try {
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({
-      model: "gemini-3-pro-preview",
+      model: "gemini-2.5-pro",
       generationConfig: { temperature: 0.1 },
     });
 
@@ -262,25 +262,27 @@ async function captureTreeState(tabId, node) {
       });
       let svgHtml = outerObj.outerHTML;
 
-      // 仅做必要清洗
+      // 🔥 暴力清洗：只保留 viewBox, d, fill, xmlns
+      // 移除所有 style, class, width, height, stroke (让 Tailwind 控制)
       svgHtml = svgHtml
-        .replace(/style="[^"]*display:\s*none[^"]*"/gi, "")
-        .replace(/display:\s*none;?/gi, "")
-        .replace(/\bhidden\b/gi, "");
+        .replace(/style="[^"]*"/gi, "")
+        .replace(/class="[^"]*"/gi, "")
+        .replace(/width="[^"]*"/gi, "")
+        .replace(/height="[^"]*"/gi, "")
+        .replace(/stroke="[^"]*"/gi, "") // 删掉原生的 stroke，防止干扰
+        .replace(/stroke-width="[^"]*"/gi, ""); // 删掉原生的 width
 
-      // 注入 computed 颜色 (以防万一)，但不改 Path
+      // 重新把必要的 Computed 尺寸加回去，作为一个干净的 style
       const computed = styles.computedStyle;
-      let styleInj = "";
-      if (computed.width && computed.width !== "auto")
-        styleInj += `width:${computed.width};`;
-      if (computed.height && computed.height !== "auto")
-        styleInj += `height:${computed.height};`;
-      if (computed.color)
-        styleInj += `color:${computed.color}; fill:currentColor;`;
+      let cleanStyle = `width:${computed.width || "1em"};height:${
+        computed.height || "1em"
+      };`;
+      // 颜色交给 AI 通过 class 处理，或者这里硬编码 currentColor
 
-      if (svgHtml.includes('style="'))
-        svgHtml = svgHtml.replace('style="', `style="${styleInj} `);
-      else svgHtml = svgHtml.replace("<svg", `<svg style="${styleInj}"`);
+      svgHtml = svgHtml.replace(
+        "<svg",
+        `<svg style="${cleanStyle}" fill="currentColor"`
+      );
 
       return { type: "svg_raw", html: svgHtml, computedStyle: computed };
     } catch (e) {
@@ -306,10 +308,50 @@ async function captureTreeState(tabId, node) {
   };
 }
 
+// ==========================================
+// 辅助函数：从 CSS 文本中提取所有被引用的变量名 var(--xxx)
+// ==========================================
+function extractUsedVariables(cssText) {
+  const vars = new Set();
+  // 匹配 var(--variable-name)
+  const regex = /var\((--[a-zA-Z0-9-_]+)[^)]*\)/g;
+  let match;
+  while ((match = regex.exec(cssText)) !== null) {
+    vars.add(match[1]);
+  }
+  return vars;
+}
+
+// ==========================================
+// 辅助函数：解析 CSS 文本为对象 (简化版)
+// 将 "color: red; width: 10px" 转换为 { color: "red", width: "10px" }
+// ==========================================
+function parseCssText(cssText) {
+  const style = {};
+  if (!cssText) return style;
+
+  // 去除注释
+  cssText = cssText.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const parts = cssText.split(";");
+  for (const part of parts) {
+    const [key, ...valParts] = part.split(":");
+    if (key && valParts.length > 0) {
+      const propName = key.trim().toLowerCase();
+      style[propName] = valParts.join(":").trim();
+    }
+  }
+  return style;
+}
+
+// ==========================================
+// 核心逻辑：获取并清洗样式
+// ==========================================
 async function fetchStylesForNode(tabId, nodeId) {
   const result = { computedStyle: {}, matchedRules: [] };
 
-  // 1. Computed Style (V18.4 全量版)
+  // 1. 获取 Computed Style (用于最终校验)
+  // ... (保持 V27.5 的清洗逻辑)
   try {
     const computedResult = await sendDebuggerCommand(
       tabId,
@@ -322,39 +364,112 @@ async function fetchStylesForNode(tabId, nodeId) {
     return null;
   }
 
-  // 2. Matched Rules + Inherited (V23 完整版)
+  // 2. 获取原始 Matched Rules
   try {
     const matchedResult = await sendDebuggerCommand(
       tabId,
       "CSS.getMatchedStylesForNode",
       { nodeId }
     );
+
     if (matchedResult) {
-      const allRules = [];
-      // 自身规则
-      if (matchedResult.matchedCSSRules) {
-        allRules.push(...matchedResult.matchedCSSRules);
+      // A. 收集当前元素“自身”的所有规则
+      const ownRules = matchedResult.matchedCSSRules || [];
+      const ownCssText = ownRules.map((r) => r.rule.style.cssText).join(" ");
+      const inlineStyleText = matchedResult.inlineStyle
+        ? matchedResult.inlineStyle.cssText
+        : "";
+
+      // B. 分析“自身”用到了哪些变量
+      // 只有当前元素明确用到的变量，我们才去继承链里找定义
+      const usedVars = new Set([
+        ...extractUsedVariables(ownCssText),
+        ...extractUsedVariables(inlineStyleText),
+      ]);
+
+      // C. 分析“自身”定义了哪些属性 (用于判断覆盖)
+      const ownProperties = new Set();
+      [...ownRules].forEach((r) => {
+        const props = parseCssText(r.rule.style.cssText);
+        Object.keys(props).forEach((k) => ownProperties.add(k));
+      });
+      if (matchedResult.inlineStyle) {
+        const inlineProps = parseCssText(matchedResult.inlineStyle.cssText);
+        Object.keys(inlineProps).forEach((k) => ownProperties.add(k));
       }
-      // 🔥 继承规则 (DevTools 视角)
+
+      // D. 组装最终规则列表
+      const finalRules = [];
+
+      // D-1. 先放入自身的规则 (全部保留)
+      ownRules.forEach((r) => {
+        if (r.rule.origin !== "user-agent") {
+          finalRules.push({
+            selector: r.rule.selectorList.text,
+            cssText: r.rule.style.cssText,
+            type: "Own Rule",
+          });
+        }
+      });
+
+      // D-2. 处理继承规则 (Tree Shaking 核心!)
       if (matchedResult.inherited) {
         matchedResult.inherited.forEach((entry) => {
-          if (entry.matchedCSSRules) {
-            allRules.push(...entry.matchedCSSRules);
-          }
+          if (!entry.matchedCSSRules) return;
+
+          entry.matchedCSSRules.forEach((r) => {
+            if (r.rule.origin === "user-agent") return;
+
+            const parentCssText = r.rule.style.cssText;
+            const parentProps = parseCssText(parentCssText);
+            let keepRule = false;
+            let cleanParentCss = [];
+
+            // 遍历父级规则的每一个属性
+            for (const [prop, val] of Object.entries(parentProps)) {
+              // 情况 1: 是 CSS 变量
+              if (prop.startsWith("--")) {
+                // 只有当这个变量被子元素(usedVars)引用时，才保留定义
+                if (usedVars.has(prop)) {
+                  cleanParentCss.push(`${prop}: ${val}`);
+                  keepRule = true;
+                }
+              }
+              // 情况 2: 是普通属性 (如 color, font-family)
+              else {
+                // 只有当子元素没有重写这个属性时，才保留继承
+                // (注意：这里还可以更激进，对比 Computed Style，但目前先做属性名碰撞检测)
+                if (!ownProperties.has(prop)) {
+                  cleanParentCss.push(`${prop}: ${val}`);
+                  keepRule = true;
+                  // 这是一个被继承下来的有效属性，也算作子元素拥有的属性，
+                  // 防止更上层的祖先再次覆盖它 (CSS Cascading logic)
+                  ownProperties.add(prop);
+                }
+              }
+            }
+
+            // 只有当这条规则里至少有一个属性是有用的，才加入 Input
+            if (keepRule && cleanParentCss.length > 0) {
+              finalRules.push({
+                selector: r.rule.selectorList.text + " (Inherited)",
+                cssText: cleanParentCss.join("; "), // 只发送精简后的 CSS
+                type: "Inherited",
+              });
+            }
+          });
         });
       }
-      result.matchedRules = allRules
-        .filter((r) => r.rule.origin !== "user-agent")
-        .map((r) => ({
-          selector: r.rule.selectorList.text,
-          cssText: r.rule.style.cssText,
-        }));
+
+      result.matchedRules = finalRules;
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn("Rules fetch error", e);
+  }
   return result;
 }
 
-// 序列化 (V18.3 原生样式保留版 + Base64 防护)
+// 序列化 (V30.0 逻辑分离版：Rules vs Vars)
 function serializeTreeToHTML(node) {
   if (!node) return "";
   if (node.type === "text") return node.content;
@@ -363,81 +478,199 @@ function serializeTreeToHTML(node) {
   if (node.type === "element") {
     const tagName = node.tagName;
 
+    // 1. 处理 Computed Style (保持 V18.3 逻辑)
     const computedString = Object.entries(node.computedStyle || {})
       .map(([k, v]) => `${k}:${v}`)
       .join(";");
 
+    // 2. 🔥 V30.0 修改核心：规则分离 (Rule Separation) 🔥
+    // 我们不再生成一个巨大的 data-matched-rules，而是拆分为 data-rules (逻辑) 和 data-vars (变量定义)
     let rulesAttr = "";
+    let varsAttr = "";
+
     if (node.matchedRules && node.matchedRules.length > 0) {
-      const allRules = node.matchedRules
-        .map((r) => `${r.selector} { ${r.cssText} }`)
-        .join(" ");
-      if (allRules.trim()) {
-        rulesAttr = ` data-matched-rules="${allRules.replace(/"/g, "'")}"`;
+      let ownCss = "";
+      let inheritedVars = "";
+
+      node.matchedRules.forEach((r) => {
+        // 如果是继承规则 (来自 V28 fetchStylesForNode 的标记)
+        if (r.type === "Inherited") {
+          // 只提取 CSS 变量 (--variable: value)
+          // 过滤掉非变量的普通属性，节省 Token
+          const vars = r.cssText
+            .split(";")
+            .filter((s) => s.trim().startsWith("--"))
+            .join(";");
+
+          if (vars.trim()) {
+            inheritedVars += vars + "; ";
+          }
+        }
+        // 如果是自身的规则 (Own Rule)
+        else {
+          // 保留完整的选择器和内容 (用于 hover, active 等逻辑)
+          ownCss += `${r.selector} { ${r.cssText} } `;
+        }
+      });
+
+      // 组装属性字符串
+      if (ownCss.trim()) {
+        rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
+      }
+      if (inheritedVars.trim()) {
+        varsAttr = ` data-vars="${inheritedVars.replace(/"/g, "'").trim()}"`;
       }
     }
 
+    // 3. 处理常规属性 (保持 V18.3 逻辑 + Base64 防护)
     let otherAttrs = "";
     let originalStyle = "";
 
     if (node.attributes) {
       Object.entries(node.attributes).forEach(([key, value]) => {
+        // 跳过黑名单
         if (key === "class" || key === "data-divmagic-id") return;
 
+        // 提取原生内联 style
         if (key === "style") {
           originalStyle = value;
           return;
         }
 
+        // 跳过事件监听
         if (key.startsWith("on")) return;
 
+        // Base64 防护：截断超长属性
         let safeValue = String(value);
         if (safeValue.length > 500 && key !== "d") {
-          safeValue = safeValue.substring(0, 100) + "...";
+          safeValue = safeValue.substring(0, 100) + "...[TRUNCATED]";
         }
+
+        // 转义引号
         safeValue = safeValue.replace(/"/g, "&quot;");
         otherAttrs += ` ${key}="${safeValue}"`;
       });
     }
 
+    // 4. 组装最终标签
+    // 优先使用原生内联 style (originalStyle)，如果没有才用 Computed (computedString)
     const finalStyle = originalStyle || computedString;
+
+    // 恢复 class 属性
     const classAttr = node.attributes.class
       ? `class="${node.attributes.class}"`
       : "";
 
-    let openTag = `<${tagName} ${classAttr} style="${finalStyle}" data-computed-style="${computedString}"${otherAttrs}${rulesAttr}>`;
+    // 🔥 注意：这里我们要把 data-rules 和 data-vars 都拼进去
+    // data-computed-style 依然保留，作为兜底
+    let openTag = `<${tagName} ${classAttr} style="${finalStyle}" data-computed-style="${computedString}"${rulesAttr}${varsAttr}${otherAttrs}>`;
 
     const childrenHTML = node.children
       .map((child) => serializeTreeToHTML(child))
       .join("");
+
     return `${openTag}${childrenHTML}</${tagName}>`;
   }
   return "";
 }
 
-// Computed Style 全量清洗 (V18.4)
-function processComputedStyle(cdpStyleArray) {
+// Computed Style 全量清洗
+function processComputedStyle(cdpStyleArray, parentStyleObj = null) {
   const styleObj = {};
+
+  // 🗑️ 垃圾过滤器
   const isGarbage = (name, value) => {
-    if (name.startsWith("-webkit-")) return true;
-    if (name.startsWith("-moz-")) return true;
-    if (name.startsWith("-ms-")) return true;
-    if (value === "initial") return true;
+    // 🔥🔥🔥 核心修复：在这里！🔥🔥🔥
+    // 凡是以 -- 开头的 CSS 变量，在 Computed Style 里一律杀无赦。
+    // 理由：变量的定义已经在 data-vars 里了，这里只需要最终的像素值。
+    if (name.startsWith("--")) return true;
+
+    // 原有的黑名单逻辑
     if (
-      value === "none" &&
-      name !== "display" &&
-      name !== "float" &&
-      name !== "background-image"
+      name.startsWith("-webkit-") ||
+      name.startsWith("-moz-") ||
+      name.startsWith("-ms-")
     )
       return true;
+
+    // 原有的省流逻辑
+    if (
+      value === "auto" ||
+      value === "normal" ||
+      value === "none" ||
+      value === "0px"
+    )
+      return true;
+    if (value === "rgba(0, 0, 0, 0)" || value === "transparent") return true;
+    if (value === "repeat" || value === "scroll") return true;
+    if (
+      name.includes("animation") ||
+      name.includes("transition") ||
+      name.includes("mask") ||
+      name.includes("break")
+    )
+      return false;
+
     return false;
   };
 
+  // 🌟 必须保留的布局属性 (白名单)
+  const mustKeep = new Set([
+    "display",
+    "position",
+    "width",
+    "height",
+    "top",
+    "left",
+    "bottom",
+    "right",
+    "z-index",
+    "opacity",
+    "transform",
+    "margin",
+    "padding",
+  ]);
+
+  // V29 的数值精度处理
+  const roundValue = (value) => {
+    if (typeof value !== "string") return value;
+    return value.replace(/(\d+\.\d{2})\d+/g, "$1"); // 保留2位小数
+  };
+
+  // V29 的可继承属性列表 (用于 Diff)
+  const INHERITABLE_PROPS = new Set([
+    "color",
+    "font-family",
+    "font-size",
+    "font-weight",
+    "font-style",
+    "line-height",
+    "letter-spacing",
+    "text-align",
+    "visibility",
+    "cursor",
+    "fill",
+    "stroke",
+  ]);
+
   cdpStyleArray.forEach((p) => {
-    if (!isGarbage(p.name, p.value)) {
-      styleObj[p.name] = p.value;
+    const name = p.name;
+    const rawValue = p.value;
+    const cleanValue = roundValue(rawValue);
+
+    // 1. 执行垃圾过滤 (含变量过滤)
+    if (!mustKeep.has(name) && isGarbage(name, cleanValue)) return;
+
+    // 2. 执行继承 Diff (如果和父级一样，就不发)
+    if (parentStyleObj && INHERITABLE_PROPS.has(name)) {
+      if (parentStyleObj[name] === cleanValue) {
+        return; // 丢弃重复的继承值
+      }
     }
+
+    styleObj[name] = cleanValue;
   });
+
   return styleObj;
 }
 
