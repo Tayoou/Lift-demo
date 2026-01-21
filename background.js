@@ -4,16 +4,20 @@ import { GEMINI_API_KEY } from "./config.js";
 const debuggingTabs = new Set();
 
 // ==========================================
-// 1. 基础事件监听
+// 1. 事件监听 (V50+ HUD 交互模式)
 // ==========================================
-chrome.action.onClicked.addListener(async (tab) => {
-  try {
-    await chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_PICKER" });
-  } catch (e) {
-    console.warn("Content script not ready.", e);
-  }
+
+// A. 点击图标 -> 激活 HUD
+chrome.action.onClicked.addListener((tab) => {
+  chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ["content.js"]
+  }, () => {
+    chrome.tabs.sendMessage(tab.id, { type: "ACTIVATE_HUD" }).catch(e => console.log("Init HUD msg", e));
+  });
 });
 
+// B. AI 流式端口
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "AI_STREAM_PORT") {
     console.log("🔗 [Background] AI Stream Port Connected");
@@ -25,14 +29,18 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+// C. 全局消息路由
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "DEMO_ELEMENT_SELECTED") {
+  // 1. HUD 请求打开 Sidepanel
+  if (msg.type === "OPEN_SIDEPANEL") {
     if (sender.tab?.id) {
-      chrome.sidePanel
-        .open({ tabId: sender.tab.id, windowId: sender.tab.windowId })
+      chrome.sidePanel.open({ tabId: sender.tab.id, windowId: sender.tab.windowId })
         .catch(console.error);
     }
+    return;
   }
+
+  // 2. 截图请求
   if (msg.type === "CAPTURE_VISIBLE_TAB") {
     chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
       sendResponse({
@@ -43,6 +51,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+
+  // 3. CDP 样式采集 (核心入口)
   if (msg.type === "CDP_GET_STYLE") {
     handleCdpGetTreeStyles(msg, sender, sendResponse);
     return true;
@@ -50,7 +60,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ==========================================
-// 2. AI 处理核心 (配合 V22 的逻辑 Prompt)
+// 2. AI 处理核心
 // ==========================================
 async function handleGeminiTestStream(msg, port) {
   const stylesData = msg.styles;
@@ -60,40 +70,23 @@ async function handleGeminiTestStream(msg, port) {
     return;
   }
 
-  const prompt = `Role: Pixel-Perfect HTML-to-Tailwind Converter.
+  const prompt = `Role: Senior Frontend Engineer (Tailwind CSS Specialist).
 
-Task: Convert the provided **Augmented HTML** into a React component.
-Goal: 100% visual fidelity.
+Task: Reconstruct the provided **Augmented HTML** into a responsive React component.
+Goal: 100% visual fidelity + 100% logical responsiveness.
 
-🚨 DATA CONTEXT:
-The input was captured in a **FORCED HOVER STATE**.
-- **Inline \`style\`**: Represents the element's FINAL state (including hover effects).
-- **\`data-matched-rules\`**: Contains the transition logic.
+🚨 DATA SOURCE PROTOCOL (STRICT PRIORITY):
+1. **PRIORITY 1: \`data-rules\`**: Check CSS variables and logical widths (100%, 50%) here first.
+2. **PRIORITY 2: \`computed-style\`**: Fallback for specific values.
 
-STRATEGY:
-
-1. **Z-INDEX (STRICT)**:
-   - **DO NOT INVENT Z-INDEX values.** - Check the inline \`style\` or \`data-computed-style\`.
-   - If \`z-index\` is \`auto\` or undefined -> **DO NOT** add a \`z-*\` class. Leave it as default.
-   - If \`z-index\` is a number (e.g., \`3\`) -> Use \`z-[3]\` or \`z-30\` (Tailwind convention).
-   - **Reason**: Adding arbitrary z-indexes breaks the natural DOM stacking order.
-
-2. **LAYOUT & POSITION**:
-   - Trust inline \`style\` implicitly. 
-   - If \`style\` says \`width: 472px\`, use \`w-[472px]\`. Do not guess \`w-full\`.
-
-3. **INTERACTION (Reverse Engineering)**:
-   - Since input style shows the *Hover* state (e.g., \`transform: translateY(-32px)\`), you must check \`data-matched-rules\` to confirm this is a hover effect.
-   - If confirmed, assume the *initial* state is \`transform-none\` (or whatever the base rule says).
-   - Code pattern: \`transform-none hover:-translate-y-[32px]\`.
-
-4. **SVG**:
-   - Copy EXACTLY. Do NOT add \`stroke-width\` or \`stroke\` unless explicitly in the computed style.
-   - If Input SVG path has attributes like \`stroke-width="1"\`, keep it. Don't change it to 2.
+⛔️ CRITICAL LAYOUT RULES:
+1. **INTERACTIVE VISIBILITY**: Force \`z-10\` on absolute positioned interactive elements.
+2. **SVG PURITY**: Keep SVG paths exact.
+3. **RESPONSIVE WIDTH**: Prefer relative widths over fixed pixels.
 
 OUTPUT FORMAT:
-- Returns raw JSX code.
-- Define component as \`const Component = () => { ... }\`.
+- Returns ONLY raw JSX code.
+- Define component as \`const Component = () => { ... }\`.  <-- 🔥 把这一行加回来！
 - No markdown.
 
 INPUT HTML:
@@ -113,17 +106,10 @@ ${stylesData}`;
     for await (const chunk of result.stream) {
       const chunkText = chunk.text();
       fullText += chunkText;
-      port.postMessage({
-        type: "STREAM_CHUNK",
-        chunk: chunkText,
-        text: chunkText,
-      });
+      port.postMessage({ type: "STREAM_CHUNK", chunk: chunkText, text: chunkText });
     }
 
-    const cleanAiText = fullText
-      .replace(/^```(jsx|html|javascript)?\n/, "")
-      .replace(/^```/, "")
-      .replace(/```$/, "");
+    const cleanAiText = fullText.replace(/^```(jsx|html|javascript)?\n/, "").replace(/```$/, "");
     port.postMessage({ type: "STREAM_DONE" });
     port.postMessage({ success: true, data: cleanAiText });
   } catch (error) {
@@ -132,40 +118,31 @@ ${stylesData}`;
   }
 }
 
-// ==========================================
-// 辅助函数：递归收集子树中所有节点的 ID
-// ==========================================
+// 辅助函数
 function collectAllNodeIds(node, ids = []) {
-  if (node.nodeId) {
-    ids.push(node.nodeId);
-  }
-  if (node.children) {
-    node.children.forEach((child) => collectAllNodeIds(child, ids));
-  }
+  if (node.nodeId) ids.push(node.nodeId);
+  if (node.children) node.children.forEach((child) => collectAllNodeIds(child, ids));
   return ids;
 }
 
 // ==========================================
-// 3. CDP 核心逻辑 (V25.0 全员 Hover)
+// 3. CDP 核心逻辑 (V53.0: 采集 + AI 自动触发 + 模拟端口转发)
 // ==========================================
 async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   const tabId = sender.tab.id;
-  // 提取 Selector ID
   const match = msg.selector.match(/data-divmagic-id="([^"]+)"/);
   const targetSelectorId = match ? match[1] : null;
 
   console.log(`⚖️ [Engine] Starting Capture for: ${targetSelectorId}`);
 
   try {
-    // 1. 连接
+    // 1. 连接调试器
     try {
       await chrome.debugger.attach({ tabId }, "1.3");
       debuggingTabs.add(tabId);
     } catch (e) {
       if (!e.message.includes("already attached")) {
-        try {
-          await chrome.debugger.detach({ tabId });
-        } catch (_) {}
+        try { await chrome.debugger.detach({ tabId }); } catch (_) { }
         await chrome.debugger.attach({ tabId }, "1.3");
       }
     }
@@ -173,59 +150,102 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
     await sendDebuggerCommand(tabId, "DOM.enable");
     await sendDebuggerCommand(tabId, "CSS.enable");
 
-    // 2. 定位根节点
-    const doc = await sendDebuggerCommand(tabId, "DOM.getDocument", {
-      depth: -1,
-    }); // depth: -1 拿全量树
-    const rootNode = findNodeByAttributeValue(
-      doc.root,
-      "data-divmagic-id",
-      targetSelectorId
-    );
+    const doc = await sendDebuggerCommand(tabId, "DOM.getDocument", { depth: -1 });
+    const rootNode = findNodeByAttributeValue(doc.root, "data-divmagic-id", targetSelectorId);
 
     if (!rootNode) throw new Error("Target node not found.");
-    console.log(`✅ Root Node Found ID: ${rootNode.nodeId}`);
 
-    // 🔥 3. 圣诞树模式：强制所有节点 Hover 🔥
-    // 这解决了“子元素独立 Hover 动画”丢失的问题
+    // 2. 强制 Hover
     const allNodeIds = collectAllNodeIds(rootNode);
-    console.log(`⚡️ Forcing Hover on ${allNodeIds.length} nodes...`);
-
-    // 并行发送指令，为了性能和稳定性，我们可以分批或者直接 Promise.all
-    // 这里的 catch 是为了防止某个节点（比如 shadowRoot 里的）报错导致全盘崩溃
-    await Promise.all(
-      allNodeIds.map((id) =>
-        sendDebuggerCommand(tabId, "CSS.forcePseudoState", {
-          nodeId: id,
-          forcedPseudoClasses: ["hover"],
-        }).catch((e) => {})
-      )
-    );
-
-    // 给浏览器一点喘息时间重算样式 (Layout Thrashing)
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: ["hover"] }).catch((e) => { })));
     await new Promise((r) => setTimeout(r, 100));
 
-    // 4. 采集 (Inherited + Computed + Clean SVG + Full Rules)
-    console.log("📸 Capturing Tree State (All-Hovered)...");
+    // 3. 采集数据
+    console.log("📸 Capturing Tree State...");
     const finalTree = await captureTreeState(tabId, rootNode);
 
-    // 5. 还原状态 (打扫现场)
-    // 同样需要递归还原，否则页面会乱套
-    await Promise.all(
-      allNodeIds.map((id) =>
-        sendDebuggerCommand(tabId, "CSS.forcePseudoState", {
-          nodeId: id,
-          forcedPseudoClasses: [],
-        }).catch((e) => {})
-      )
-    );
+    // 4. 获取尺寸
+    let rootLayout = { width: "auto", height: "auto" };
+    try {
+      const boxModel = await sendDebuggerCommand(tabId, "DOM.getBoxModel", { nodeId: rootNode.nodeId });
+      if (boxModel && boxModel.model) {
+        rootLayout = { width: boxModel.model.width, height: boxModel.model.height };
+      }
+    } catch (e) { }
 
-    // 6. 序列化
+    // 5. 还原状态
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: [] }).catch((e) => { })));
+
     console.log("📝 Serializing...");
     const htmlOutput = serializeTreeToHTML(finalTree);
+    console.log(`✅ Complete. HTML Length: ${htmlOutput.length}`);
 
-    console.log(`✅ Complete.`);
-    sendResponse({ success: true, data: htmlOutput });
+    // ============================================================
+    // 🔥 修复 1: 发送一个“合法的” React 组件作为 Loading 占位符
+    // ============================================================
+    // 这样 preview.html 就不会报 ReferenceError 了
+    const loadingComponent = `
+      const Component = () => {
+        return (
+          <div className="flex flex-col items-center justify-center h-full space-y-4 p-8 text-slate-400">
+            <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            <div className="text-sm font-mono animate-pulse">AI is analyzing structure...</div>
+          </div>
+        );
+      };
+    `;
+
+    const broadcastPayload = {
+      type: "UPDATE_CODE_WITH_REAL_DATA",
+      code: loadingComponent,
+      layout: rootLayout
+    };
+
+    // 发送 Loading 状态 (多次尝试确保 Sidepanel 收到)
+    chrome.runtime.sendMessage(broadcastPayload).catch(() => { });
+    setTimeout(() => chrome.runtime.sendMessage(broadcastPayload).catch(() => { }), 500);
+
+    // 回复 content script (让遮罩层恢复)
+    sendResponse({ success: true, data: htmlOutput, layout: rootLayout });
+
+    // ============================================================
+    // 🔥 修复 2: 自动触发 AI (Internal Bridge)
+    // ============================================================
+    // 我们不需要等待 Content Script 再发请求，直接在这里调用 AI
+    console.log("🚀 Triggering AI Internally...");
+
+    // 创建一个“伪造”的 Port 对象，拦截 AI 的输出并转发给 Sidepanel
+    let accumulatedText = "";
+    const mockPort = {
+      postMessage: (msg) => {
+        // 如果是流式片段
+        if (msg.type === "STREAM_CHUNK") {
+          accumulatedText += (msg.chunk || msg.text || "");
+          // 可选：实时把半成品代码发给 Sidepanel (这看起来很酷)
+          // chrome.runtime.sendMessage({ 
+          //    type: "UPDATE_CODE_WITH_REAL_DATA", 
+          //    code: accumulatedText, 
+          //    layout: rootLayout 
+          // }).catch(()=>{});
+        }
+        // 如果是完成信号
+        if (msg.type === "STREAM_DONE" || (msg.success && msg.data)) {
+          const finalCode = msg.data || accumulatedText;
+          console.log("🤖 AI Finished. Broadcasting Code.");
+
+          // 发送最终代码给 Sidepanel
+          chrome.runtime.sendMessage({
+            type: "UPDATE_CODE_WITH_REAL_DATA",
+            code: finalCode,
+            layout: rootLayout
+          }).catch((err) => console.warn("Sidepanel closed?", err));
+        }
+      }
+    };
+
+    // 立即执行 AI
+    await handleGeminiTestStream({ styles: htmlOutput }, mockPort);
+
   } catch (error) {
     console.error("❌ CDP Error:", error);
     sendResponse({ success: false, error: error.message });
@@ -233,444 +253,214 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   }
 }
 
-async function captureTreeState(tabId, node) {
+// 辅助：清洗 CSS
+function purifyCssText(cssText) {
+  if (!cssText) return "";
+  return cssText
+    .replace(/(margin|margin-top|margin-bottom|margin-left|margin-right)\s*:[^;]+;?/gi, '')
+    .replace(/(top|left|right|bottom)\s*:[^;]+;?/gi, '')
+    .replace(/(align|justify)-self\s*:[^;]+;?/gi, '');
+}
+
+// 递归采集
+async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot = true) {
   if (!node) return null;
-  if (node.nodeType === 3)
-    return node.nodeValue.trim()
-      ? { type: "text", content: node.nodeValue.trim() }
-      : null;
+  if (node.nodeType === 3) return node.nodeValue.trim() ? { type: "text", content: node.nodeValue.trim() } : null;
   if (node.nodeType !== 1) return null;
 
   const tagName = node.nodeName.toLowerCase();
-  if (["script", "style", "noscript", "iframe", "comment"].includes(tagName))
-    return null;
+  if (["script", "style", "noscript", "iframe", "comment"].includes(tagName)) return null;
 
-  // 微小延时防丢包
-  await new Promise((r) => setTimeout(r, 2));
-
-  // 获取样式 (含 Inherited)
-  const styles = await fetchStylesForNode(tabId, node.nodeId);
+  const styles = await fetchStylesForNode(tabId, node.nodeId, parentComputedStyle, isRoot);
   if (!styles) return null;
 
-  const attrs = formatAttributes(node.attributes);
+  let currentComputedStyle = styles.computedStyle;
 
-  // SVG 处理 (V21 纯净版 - 无注入)
-  if (tagName === "svg") {
-    try {
-      const outerObj = await sendDebuggerCommand(tabId, "DOM.getOuterHTML", {
-        nodeId: node.nodeId,
+  if (isRoot) {
+    // 根节点净化
+    ["margin", "top", "left", "right", "bottom", "alignSelf", "justifySelf"].forEach(k => delete currentComputedStyle[k]);
+    ["marginTop", "marginBottom", "marginLeft", "marginRight"].forEach(k => delete currentComputedStyle[k]);
+
+    if (styles.matchedRules) {
+      styles.matchedRules = styles.matchedRules.map(rule => {
+        if (rule.type !== "Inherited" && rule.type !== "RootVars") {
+          return { ...rule, cssText: purifyCssText(rule.cssText) };
+        }
+        return rule;
       });
-      let svgHtml = outerObj.outerHTML;
-
-      // 🔥 暴力清洗：只保留 viewBox, d, fill, xmlns
-      // 移除所有 style, class, width, height, stroke (让 Tailwind 控制)
-      svgHtml = svgHtml
-        .replace(/style="[^"]*"/gi, "")
-        .replace(/class="[^"]*"/gi, "")
-        .replace(/width="[^"]*"/gi, "")
-        .replace(/height="[^"]*"/gi, "")
-        .replace(/stroke="[^"]*"/gi, "") // 删掉原生的 stroke，防止干扰
-        .replace(/stroke-width="[^"]*"/gi, ""); // 删掉原生的 width
-
-      // 重新把必要的 Computed 尺寸加回去，作为一个干净的 style
-      const computed = styles.computedStyle;
-      let cleanStyle = `width:${computed.width || "1em"};height:${
-        computed.height || "1em"
-      };`;
-      // 颜色交给 AI 通过 class 处理，或者这里硬编码 currentColor
-
-      svgHtml = svgHtml.replace(
-        "<svg",
-        `<svg style="${cleanStyle}" fill="currentColor"`
-      );
-
-      return { type: "svg_raw", html: svgHtml, computedStyle: computed };
-    } catch (e) {
-      return null;
     }
   }
 
+  if (tagName === "svg") {
+    try {
+      const outerObj = await sendDebuggerCommand(tabId, "DOM.getOuterHTML", { nodeId: node.nodeId });
+      let svgHtml = outerObj.outerHTML
+        .replace(/style="[^"]*"/gi, '')
+        .replace(/width="[^"]*"/gi, '')
+        .replace(/height="[^"]*"/gi, '');
+      let cleanStyle = `width:${currentComputedStyle.width};height:${currentComputedStyle.height};${currentComputedStyle.color ? `color:${currentComputedStyle.color};fill:currentColor;` : ''}`;
+      return { type: "svg_raw", html: svgHtml.replace('<svg', `<svg style="${cleanStyle}"`), computedStyle: currentComputedStyle };
+    } catch (e) { return null; }
+  }
+
   const children = [];
+  if (node.pseudoElements) {
+    for (const pseudo of node.pseudoElements) {
+      const processed = await captureTreeState(tabId, pseudo, currentComputedStyle, false);
+      if (processed) { processed.isPseudo = true; children.push(processed); }
+    }
+  }
   if (node.children) {
     for (const child of node.children) {
-      const processed = await captureTreeState(tabId, child);
+      const processed = await captureTreeState(tabId, child, currentComputedStyle, false);
       if (processed) children.push(processed);
     }
   }
 
+  const finalTagName = tagName.startsWith("::") ? "div" : tagName;
+  const finalAttributes = formatAttributes(node.attributes);
+  if (tagName.startsWith("::")) finalAttributes["data-pseudo"] = tagName.replace("::", "");
+
   return {
     type: "element",
-    tagName,
-    attributes: attrs,
-    computedStyle: styles.computedStyle,
+    tagName: finalTagName,
+    attributes: finalAttributes,
+    computedStyle: currentComputedStyle,
     matchedRules: styles.matchedRules,
-    children,
+    children
   };
 }
 
-// ==========================================
-// 辅助函数：从 CSS 文本中提取所有被引用的变量名 var(--xxx)
-// ==========================================
 function extractUsedVariables(cssText) {
   const vars = new Set();
-  // 匹配 var(--variable-name)
   const regex = /var\((--[a-zA-Z0-9-_]+)[^)]*\)/g;
   let match;
-  while ((match = regex.exec(cssText)) !== null) {
-    vars.add(match[1]);
-  }
+  while ((match = regex.exec(cssText)) !== null) vars.add(match[1]);
   return vars;
 }
 
-// ==========================================
-// 辅助函数：解析 CSS 文本为对象 (简化版)
-// 将 "color: red; width: 10px" 转换为 { color: "red", width: "10px" }
-// ==========================================
 function parseCssText(cssText) {
   const style = {};
   if (!cssText) return style;
-
-  // 去除注释
-  cssText = cssText.replace(/\/\*[\s\S]*?\*\//g, "");
-
-  const parts = cssText.split(";");
-  for (const part of parts) {
+  cssText.split(";").forEach(part => {
     const [key, ...valParts] = part.split(":");
-    if (key && valParts.length > 0) {
-      const propName = key.trim().toLowerCase();
-      style[propName] = valParts.join(":").trim();
-    }
-  }
+    if (key && valParts.length) style[key.trim().toLowerCase()] = valParts.join(":").trim();
+  });
   return style;
 }
 
-// ==========================================
-// 核心逻辑：获取并清洗样式
-// ==========================================
-async function fetchStylesForNode(tabId, nodeId) {
+async function fetchStylesForNode(tabId, nodeId, parentComputedStyle, isRoot = false) {
   const result = { computedStyle: {}, matchedRules: [] };
 
-  // 1. 获取 Computed Style (用于最终校验)
-  // ... (保持 V27.5 的清洗逻辑)
   try {
-    const computedResult = await sendDebuggerCommand(
-      tabId,
-      "CSS.getComputedStyleForNode",
-      { nodeId }
-    );
-    if (computedResult)
-      result.computedStyle = processComputedStyle(computedResult.computedStyle);
-  } catch (e) {
-    return null;
-  }
-
-  // 2. 获取原始 Matched Rules
-  try {
-    const matchedResult = await sendDebuggerCommand(
-      tabId,
-      "CSS.getMatchedStylesForNode",
-      { nodeId }
-    );
-
-    if (matchedResult) {
-      // A. 收集当前元素“自身”的所有规则
-      const ownRules = matchedResult.matchedCSSRules || [];
-      const ownCssText = ownRules.map((r) => r.rule.style.cssText).join(" ");
-      const inlineStyleText = matchedResult.inlineStyle
-        ? matchedResult.inlineStyle.cssText
-        : "";
-
-      // B. 分析“自身”用到了哪些变量
-      // 只有当前元素明确用到的变量，我们才去继承链里找定义
-      const usedVars = new Set([
-        ...extractUsedVariables(ownCssText),
-        ...extractUsedVariables(inlineStyleText),
-      ]);
-
-      // C. 分析“自身”定义了哪些属性 (用于判断覆盖)
-      const ownProperties = new Set();
-      [...ownRules].forEach((r) => {
-        const props = parseCssText(r.rule.style.cssText);
-        Object.keys(props).forEach((k) => ownProperties.add(k));
-      });
-      if (matchedResult.inlineStyle) {
-        const inlineProps = parseCssText(matchedResult.inlineStyle.cssText);
-        Object.keys(inlineProps).forEach((k) => ownProperties.add(k));
-      }
-
-      // D. 组装最终规则列表
-      const finalRules = [];
-
-      // D-1. 先放入自身的规则 (全部保留)
-      ownRules.forEach((r) => {
-        if (r.rule.origin !== "user-agent") {
-          finalRules.push({
-            selector: r.rule.selectorList.text,
-            cssText: r.rule.style.cssText,
-            type: "Own Rule",
+    const computedResult = await sendDebuggerCommand(tabId, "CSS.getComputedStyleForNode", { nodeId });
+    if (computedResult) {
+      result.computedStyle = processComputedStyle(computedResult.computedStyle, parentComputedStyle, isRoot);
+      // Root Vars Rescue
+      if (isRoot) {
+        const allVars = {};
+        computedResult.computedStyle.forEach(p => { if (p.name.startsWith('--')) allVars[p.name] = p.value; });
+        if (Object.keys(allVars).length > 0) {
+          result.matchedRules.push({
+            selector: ":root",
+            cssText: Object.entries(allVars).map(([k, v]) => `${k}: ${v}`).join('; '),
+            type: "RootVars"
           });
+        }
+      }
+    }
+  } catch (e) { return null; }
+
+  try {
+    const matchedResult = await sendDebuggerCommand(tabId, "CSS.getMatchedStylesForNode", { nodeId });
+    if (matchedResult) {
+      const ownRules = matchedResult.matchedCSSRules || [];
+      const ownCssText = ownRules.map(r => r.rule.style.cssText).join(" ");
+      const inlineStyleText = matchedResult.inlineStyle ? matchedResult.inlineStyle.cssText : "";
+      const usedVars = new Set([...extractUsedVariables(ownCssText), ...extractUsedVariables(inlineStyleText)]);
+      const ownProperties = new Set();
+
+      const finalRules = [];
+      ownRules.forEach(r => {
+        if (r.rule.origin !== "user-agent") {
+          finalRules.push({ selector: r.rule.selectorList.text, cssText: r.rule.style.cssText, type: "Own Rule" });
+          Object.keys(parseCssText(r.rule.style.cssText)).forEach(k => ownProperties.add(k));
         }
       });
 
-      // D-2. 处理继承规则 (Tree Shaking 核心!)
       if (matchedResult.inherited) {
-        matchedResult.inherited.forEach((entry) => {
-          if (!entry.matchedCSSRules) return;
-
-          entry.matchedCSSRules.forEach((r) => {
-            if (r.rule.origin === "user-agent") return;
-
-            const parentCssText = r.rule.style.cssText;
-            const parentProps = parseCssText(parentCssText);
-            let keepRule = false;
-            let cleanParentCss = [];
-
-            // 遍历父级规则的每一个属性
-            for (const [prop, val] of Object.entries(parentProps)) {
-              // 情况 1: 是 CSS 变量
-              if (prop.startsWith("--")) {
-                // 只有当这个变量被子元素(usedVars)引用时，才保留定义
-                if (usedVars.has(prop)) {
-                  cleanParentCss.push(`${prop}: ${val}`);
-                  keepRule = true;
+        matchedResult.inherited.forEach(entry => {
+          if (entry.matchedCSSRules) {
+            entry.matchedCSSRules.forEach(r => {
+              if (r.rule.origin === "user-agent") return;
+              const props = parseCssText(r.rule.style.cssText);
+              const clean = [];
+              for (const [k, v] of Object.entries(props)) {
+                if ((k.startsWith('--') && usedVars.has(k)) || (!k.startsWith('--') && !ownProperties.has(k))) {
+                  clean.push(`${k}:${v}`);
+                  if (!k.startsWith('--')) ownProperties.add(k);
                 }
               }
-              // 情况 2: 是普通属性 (如 color, font-family)
-              else {
-                // 只有当子元素没有重写这个属性时，才保留继承
-                // (注意：这里还可以更激进，对比 Computed Style，但目前先做属性名碰撞检测)
-                if (!ownProperties.has(prop)) {
-                  cleanParentCss.push(`${prop}: ${val}`);
-                  keepRule = true;
-                  // 这是一个被继承下来的有效属性，也算作子元素拥有的属性，
-                  // 防止更上层的祖先再次覆盖它 (CSS Cascading logic)
-                  ownProperties.add(prop);
-                }
-              }
-            }
-
-            // 只有当这条规则里至少有一个属性是有用的，才加入 Input
-            if (keepRule && cleanParentCss.length > 0) {
-              finalRules.push({
-                selector: r.rule.selectorList.text + " (Inherited)",
-                cssText: cleanParentCss.join("; "), // 只发送精简后的 CSS
-                type: "Inherited",
-              });
-            }
-          });
+              if (clean.length) finalRules.push({ selector: r.rule.selectorList.text + " (Inherited)", cssText: clean.join(';'), type: "Inherited" });
+            });
+          }
         });
       }
-
-      result.matchedRules = finalRules;
+      result.matchedRules = [...result.matchedRules, ...finalRules];
     }
-  } catch (e) {
-    console.warn("Rules fetch error", e);
-  }
+  } catch (e) { }
   return result;
 }
 
-// 序列化 (V30.0 逻辑分离版：Rules vs Vars)
 function serializeTreeToHTML(node) {
   if (!node) return "";
   if (node.type === "text") return node.content;
   if (node.type === "svg_raw") return node.html;
 
-  if (node.type === "element") {
-    const tagName = node.tagName;
+  const tagName = node.tagName;
+  const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => `${k}:${v}`).join(";");
+  let rulesAttr = "", varsAttr = "";
 
-    // 1. 处理 Computed Style (保持 V18.3 逻辑)
-    const computedString = Object.entries(node.computedStyle || {})
-      .map(([k, v]) => `${k}:${v}`)
-      .join(";");
-
-    // 2. 🔥 V30.0 修改核心：规则分离 (Rule Separation) 🔥
-    // 我们不再生成一个巨大的 data-matched-rules，而是拆分为 data-rules (逻辑) 和 data-vars (变量定义)
-    let rulesAttr = "";
-    let varsAttr = "";
-
-    if (node.matchedRules && node.matchedRules.length > 0) {
-      let ownCss = "";
-      let inheritedVars = "";
-
-      node.matchedRules.forEach((r) => {
-        // 如果是继承规则 (来自 V28 fetchStylesForNode 的标记)
-        if (r.type === "Inherited") {
-          // 只提取 CSS 变量 (--variable: value)
-          // 过滤掉非变量的普通属性，节省 Token
-          const vars = r.cssText
-            .split(";")
-            .filter((s) => s.trim().startsWith("--"))
-            .join(";");
-
-          if (vars.trim()) {
-            inheritedVars += vars + "; ";
-          }
-        }
-        // 如果是自身的规则 (Own Rule)
-        else {
-          // 保留完整的选择器和内容 (用于 hover, active 等逻辑)
-          ownCss += `${r.selector} { ${r.cssText} } `;
-        }
-      });
-
-      // 组装属性字符串
-      if (ownCss.trim()) {
-        rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
+  if (node.matchedRules) {
+    let ownCss = "", inheritedVars = "";
+    node.matchedRules.forEach(r => {
+      if (r.type === "Inherited") {
+        const vars = r.cssText.split(";").filter(s => s.trim().startsWith("--")).join(";");
+        if (vars) inheritedVars += vars + "; ";
+      } else {
+        ownCss += `${r.selector} { ${r.cssText} } `;
       }
-      if (inheritedVars.trim()) {
-        varsAttr = ` data-vars="${inheritedVars.replace(/"/g, "'").trim()}"`;
-      }
-    }
-
-    // 3. 处理常规属性 (保持 V18.3 逻辑 + Base64 防护)
-    let otherAttrs = "";
-    let originalStyle = "";
-
-    if (node.attributes) {
-      Object.entries(node.attributes).forEach(([key, value]) => {
-        // 跳过黑名单
-        if (key === "class" || key === "data-divmagic-id") return;
-
-        // 提取原生内联 style
-        if (key === "style") {
-          originalStyle = value;
-          return;
-        }
-
-        // 跳过事件监听
-        if (key.startsWith("on")) return;
-
-        // Base64 防护：截断超长属性
-        let safeValue = String(value);
-        if (safeValue.length > 500 && key !== "d") {
-          safeValue = safeValue.substring(0, 100) + "...[TRUNCATED]";
-        }
-
-        // 转义引号
-        safeValue = safeValue.replace(/"/g, "&quot;");
-        otherAttrs += ` ${key}="${safeValue}"`;
-      });
-    }
-
-    // 4. 组装最终标签
-    // 优先使用原生内联 style (originalStyle)，如果没有才用 Computed (computedString)
-    const finalStyle = originalStyle || computedString;
-
-    // 恢复 class 属性
-    const classAttr = node.attributes.class
-      ? `class="${node.attributes.class}"`
-      : "";
-
-    // 🔥 注意：这里我们要把 data-rules 和 data-vars 都拼进去
-    // data-computed-style 依然保留，作为兜底
-    let openTag = `<${tagName} ${classAttr} style="${finalStyle}" data-computed-style="${computedString}"${rulesAttr}${varsAttr}${otherAttrs}>`;
-
-    const childrenHTML = node.children
-      .map((child) => serializeTreeToHTML(child))
-      .join("");
-
-    return `${openTag}${childrenHTML}</${tagName}>`;
+    });
+    if (ownCss) rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
+    if (inheritedVars) varsAttr = ` data-vars="${inheritedVars.replace(/"/g, "'").trim()}"`;
   }
-  return "";
+
+  let otherAttrs = "";
+  if (node.attributes) {
+    Object.entries(node.attributes).forEach(([key, value]) => {
+      if (key === "class" || key === "data-divmagic-id" || key === "style" || key.startsWith("on")) return;
+      otherAttrs += ` ${key}="${String(value).replace(/"/g, "&quot;")}"`;
+    });
+  }
+
+  const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : "";
+  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${rulesAttr}${varsAttr}${otherAttrs}>${node.children.map(serializeTreeToHTML).join('')}</${tagName}>`;
 }
 
-// Computed Style 全量清洗
-function processComputedStyle(cdpStyleArray, parentStyleObj = null) {
+function processComputedStyle(cdpStyleArray, parentStyleObj = null, isRoot = false) {
   const styleObj = {};
-
-  // 🗑️ 垃圾过滤器
+  const mustKeep = new Set(["display", "position", "width", "height", "top", "left", "bottom", "right", "z-index", "opacity", "transform", "margin", "padding"]);
   const isGarbage = (name, value) => {
-    // 🔥🔥🔥 核心修复：在这里！🔥🔥🔥
-    // 凡是以 -- 开头的 CSS 变量，在 Computed Style 里一律杀无赦。
-    // 理由：变量的定义已经在 data-vars 里了，这里只需要最终的像素值。
-    if (name.startsWith("--")) return true;
-
-    // 原有的黑名单逻辑
-    if (
-      name.startsWith("-webkit-") ||
-      name.startsWith("-moz-") ||
-      name.startsWith("-ms-")
-    )
-      return true;
-
-    // 原有的省流逻辑
-    if (
-      value === "auto" ||
-      value === "normal" ||
-      value === "none" ||
-      value === "0px"
-    )
-      return true;
-    if (value === "rgba(0, 0, 0, 0)" || value === "transparent") return true;
-    if (value === "repeat" || value === "scroll") return true;
-    if (
-      name.includes("animation") ||
-      name.includes("transition") ||
-      name.includes("mask") ||
-      name.includes("break")
-    )
-      return false;
-
+    if (name.startsWith("--")) return !isRoot;
+    if (name.startsWith("-webkit") || value === "auto" || value === "normal" || value === "none" || value === "0px" || value === "transparent") return true;
     return false;
   };
 
-  // 🌟 必须保留的布局属性 (白名单)
-  const mustKeep = new Set([
-    "display",
-    "position",
-    "width",
-    "height",
-    "top",
-    "left",
-    "bottom",
-    "right",
-    "z-index",
-    "opacity",
-    "transform",
-    "margin",
-    "padding",
-  ]);
-
-  // V29 的数值精度处理
-  const roundValue = (value) => {
-    if (typeof value !== "string") return value;
-    return value.replace(/(\d+\.\d{2})\d+/g, "$1"); // 保留2位小数
-  };
-
-  // V29 的可继承属性列表 (用于 Diff)
-  const INHERITABLE_PROPS = new Set([
-    "color",
-    "font-family",
-    "font-size",
-    "font-weight",
-    "font-style",
-    "line-height",
-    "letter-spacing",
-    "text-align",
-    "visibility",
-    "cursor",
-    "fill",
-    "stroke",
-  ]);
-
-  cdpStyleArray.forEach((p) => {
-    const name = p.name;
-    const rawValue = p.value;
-    const cleanValue = roundValue(rawValue);
-
-    // 1. 执行垃圾过滤 (含变量过滤)
-    if (!mustKeep.has(name) && isGarbage(name, cleanValue)) return;
-
-    // 2. 执行继承 Diff (如果和父级一样，就不发)
-    if (parentStyleObj && INHERITABLE_PROPS.has(name)) {
-      if (parentStyleObj[name] === cleanValue) {
-        return; // 丢弃重复的继承值
-      }
-    }
-
-    styleObj[name] = cleanValue;
+  cdpStyleArray.forEach(p => {
+    if (!mustKeep.has(p.name) && isGarbage(p.name, p.value)) return;
+    if (parentStyleObj && parentStyleObj[p.name] === p.value) return; // Simple inheritance check
+    styleObj[p.name] = p.value;
   });
-
   return styleObj;
 }
 
@@ -684,11 +474,7 @@ function formatAttributes(attrs) {
 function findNodeByAttributeValue(node, attrName, attrValue) {
   if (node.nodeType === 1 && node.attributes) {
     for (let i = 0; i < node.attributes.length; i += 2) {
-      if (
-        node.attributes[i] === attrName &&
-        node.attributes[i + 1] === attrValue
-      )
-        return node;
+      if (node.attributes[i] === attrName && node.attributes[i + 1] === attrValue) return node;
     }
   }
   if (node.children) {
@@ -706,12 +492,8 @@ async function sendDebuggerCommand(tabId, method, params) {
 
 async function cleanupDebugging(tabId) {
   if (debuggingTabs.has(tabId)) {
-    try {
-      await chrome.debugger.detach({ tabId });
-    } catch (e) {
-    } finally {
-      debuggingTabs.delete(tabId);
-    }
+    try { await chrome.debugger.detach({ tabId }); } catch (e) { }
+    debuggingTabs.delete(tabId);
   }
 }
 chrome.tabs.onRemoved.addListener(cleanupDebugging);
