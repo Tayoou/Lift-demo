@@ -86,7 +86,7 @@ Goal: 100% visual fidelity + 100% logical responsiveness.
 
 OUTPUT FORMAT:
 - Returns ONLY raw JSX code.
-- Define component as \`const Component = () => { ... }\`.  <-- 🔥 把这一行加回来！
+- Define component as \`const Component = () => { ... }\`.
 - No markdown.
 
 INPUT HTML:
