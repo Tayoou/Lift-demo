@@ -4,20 +4,15 @@ import { GEMINI_API_KEY } from "./config.js";
 const debuggingTabs = new Set();
 
 // ==========================================
-// 1. 事件监听 (V50+ HUD 交互模式)
+// 1. 事件监听
 // ==========================================
 
-// A. 点击图标 -> 激活 HUD
 chrome.action.onClicked.addListener((tab) => {
-  chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ["content.js"]
-  }, () => {
+  chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] }, () => {
     chrome.tabs.sendMessage(tab.id, { type: "ACTIVATE_HUD" }).catch(e => console.log("Init HUD msg", e));
   });
 });
 
-// B. AI 流式端口
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "AI_STREAM_PORT") {
     console.log("🔗 [Background] AI Stream Port Connected");
@@ -29,32 +24,30 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
-// C. 全局消息路由
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // 1. HUD 请求打开 Sidepanel
   if (msg.type === "OPEN_SIDEPANEL") {
-    if (sender.tab?.id) {
-      chrome.sidePanel.open({ tabId: sender.tab.id, windowId: sender.tab.windowId })
-        .catch(console.error);
-    }
+    if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id, windowId: sender.tab.windowId }).catch(console.error);
     return;
   }
 
-  // 2. 截图请求
   if (msg.type === "CAPTURE_VISIBLE_TAB") {
     chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
-      sendResponse({
-        success: !chrome.runtime.lastError,
-        dataUrl,
-        error: chrome.runtime.lastError?.message,
-      });
+      sendResponse({ success: !chrome.runtime.lastError, dataUrl, error: chrome.runtime.lastError?.message });
     });
     return true;
   }
 
-  // 3. CDP 样式采集 (核心入口)
   if (msg.type === "CDP_GET_STYLE") {
     handleCdpGetTreeStyles(msg, sender, sendResponse);
+    return true;
+  }
+
+  if (msg.type === "AI_REFINE_CODE") {
+    handleGeminiRefinement(msg.code, msg.instruction).then(newCode => {
+      sendResponse({ success: true, data: newCode });
+    }).catch(err => {
+      sendResponse({ success: false, error: err.message });
+    });
     return true;
   }
 });
@@ -62,10 +55,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ==========================================
 // 2. AI 处理核心
 // ==========================================
+
+async function getActiveApiKey() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['user_gemini_key'], (result) => {
+      if (result.user_gemini_key && result.user_gemini_key.length > 10) {
+        resolve(result.user_gemini_key);
+      } else {
+        resolve(GEMINI_API_KEY);
+      }
+    });
+  });
+}
+
 async function handleGeminiTestStream(msg, port) {
   const stylesData = msg.styles;
+  const apiKey = await getActiveApiKey();
 
-  if (GEMINI_API_KEY === "YOUR_API_KEY_HERE") {
+  if (!apiKey || apiKey === "YOUR_API_KEY_HERE") {
     port.postMessage({ success: false, error: "请配置 API Key" });
     return;
   }
@@ -76,13 +83,19 @@ Task: Reconstruct the provided **Augmented HTML** into a responsive React compon
 Goal: 100% visual fidelity + 100% logical responsiveness.
 
 🚨 DATA SOURCE PROTOCOL (STRICT PRIORITY):
-1. **PRIORITY 1: \`data-rules\`**: Check CSS variables and logical widths (100%, 50%) here first.
-2. **PRIORITY 2: \`computed-style\`**: Fallback for specific values.
+1. **PRIORITY 1: \`data-rules\`**: Check CSS variables.
+2. **PRIORITY 2: \`style\` attribute**: This is the DEFAULT state.
+3. **PRIORITY 3: \`data-hover-diff\`**: Use for hover states.
 
-⛔️ CRITICAL LAYOUT RULES:
-1. **INTERACTIVE VISIBILITY**: Force \`z-10\` on absolute positioned interactive elements.
-2. **SVG PURITY**: Keep SVG paths exact.
-3. **RESPONSIVE WIDTH**: Prefer relative widths over fixed pixels.
+🎨 COLOR STRATEGY:
+- Base color: Read from \`style\`.
+- Hover color: Read from \`data-hover-diff\`.
+
+✨ ANIMATION & LAYOUT:
+- **Retain Animations**: Look for transition/animation/transform properties.
+- **Freeze Time**: The input HTML reflects a "frozen" hover state. The values in \`data-hover-diff\` are the FINAL target values.
+- **DOM FIDELITY**: Trust the Input HTML hierarchy. If absolute layers (overlays/backgrounds) are siblings in the Input, keep them as **siblings** in React. Do NOT nest them inside other elements, otherwise transforms/opacity will stack incorrectly.
+- **PREVENT COLLAPSE**: If an \`absolute\` element uses \`padding-bottom\` (aspect ratio hack), YOU MUST give it explicit \`w-full\`.
 
 OUTPUT FORMAT:
 - Returns ONLY raw JSX code.
@@ -93,7 +106,7 @@ INPUT HTML:
 ${stylesData}`;
 
   try {
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: "gemini-2.5-pro",
       generationConfig: { temperature: 0.1 },
@@ -118,34 +131,97 @@ ${stylesData}`;
   }
 }
 
-// 辅助函数
+async function handleGeminiRefinement(currentCode, instruction) {
+  const apiKey = await getActiveApiKey();
+  if (!apiKey) throw new Error("API Key missing");
+
+  const prompt = `
+    Role: Senior React Refactoring Expert.
+    Task: Modify the provided React component based on the USER INSTRUCTION.
+
+    CONTEXT - Current Code:
+    \`\`\`jsx
+    ${currentCode}
+    \`\`\`
+
+    USER INSTRUCTION:
+    "${instruction}"
+
+    RULES:
+    1. STRICTLY output ONLY the updated raw JSX code. 
+    2. NO markdown formatting.
+    3. Use Tailwind CSS for styling changes.
+  `;
+
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text();
+
+    text = text.replace(/^```(jsx|javascript|js)?/, "").replace(/```$/, "").trim();
+    return text;
+  } catch (error) {
+    console.error("Refine Error:", error);
+    throw error;
+  }
+}
+
+// ==========================================
+// 3. CDP 核心逻辑 (🔥 核弹级冻结 + 完整采集)
+// ==========================================
+
 function collectAllNodeIds(node, ids = []) {
   if (node.nodeId) ids.push(node.nodeId);
   if (node.children) node.children.forEach((child) => collectAllNodeIds(child, ids));
   return ids;
 }
 
-// ==========================================
-// 3. CDP 核心逻辑 (V53.0: 采集 + AI 自动触发 + 模拟端口转发)
-// ==========================================
+// 🔥 V60.22: 核弹级动画冻结 (Universal Freeze)
+async function togglePageTransitions(tabId, disable) {
+  // 🔥 核心修改：增加了 *::before, *::after 选择器，并强制重置所有动画属性
+  const css = `
+    *, *::before, *::after {
+      transition-property: none !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      animation: none !important;
+      animation-duration: 0s !important;
+      animation-delay: 0s !important;
+    }
+  `;
+
+  const expression = disable
+    ? `(function(){
+            const style = document.createElement('style');
+            style.id = 'divmagic-disable-transitions';
+            style.innerHTML = \`${css}\`;
+            document.head.appendChild(style);
+            // 强制重绘 (Force Reflow) 以确保样式立即生效
+            void document.body.offsetHeight; 
+           })()`
+    : `(function(){
+            const style = document.getElementById('divmagic-disable-transitions');
+            if(style) style.remove();
+           })()`;
+
+  try {
+    await sendDebuggerCommand(tabId, "Runtime.evaluate", { expression });
+  } catch (e) { console.warn("Toggle transition failed", e); }
+}
+
 async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   const tabId = sender.tab.id;
   const match = msg.selector.match(/data-divmagic-id="([^"]+)"/);
   const targetSelectorId = match ? match[1] : null;
 
-  console.log(`⚖️ [Engine] Starting Capture for: ${targetSelectorId}`);
+  console.log(`⚖️ [Engine] Capture: ${targetSelectorId}`);
 
   try {
-    // 1. 连接调试器
-    try {
-      await chrome.debugger.attach({ tabId }, "1.3");
-      debuggingTabs.add(tabId);
-    } catch (e) {
-      if (!e.message.includes("already attached")) {
-        try { await chrome.debugger.detach({ tabId }); } catch (_) { }
-        await chrome.debugger.attach({ tabId }, "1.3");
-      }
-    }
+    try { await chrome.debugger.attach({ tabId }, "1.3"); debuggingTabs.add(tabId); }
+    catch (e) { if (!e.message.includes("already attached")) { try { await chrome.debugger.detach({ tabId }); } catch (_) { } await chrome.debugger.attach({ tabId }, "1.3"); } }
 
     await sendDebuggerCommand(tabId, "DOM.enable");
     await sendDebuggerCommand(tabId, "CSS.enable");
@@ -155,95 +231,55 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
 
     if (!rootNode) throw new Error("Target node not found.");
 
-    // 2. 强制 Hover
     const allNodeIds = collectAllNodeIds(rootNode);
-    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: ["hover"] }).catch((e) => { })));
-    await new Promise((r) => setTimeout(r, 100));
 
-    // 3. 采集数据
-    console.log("📸 Capturing Tree State...");
-    const finalTree = await captureTreeState(tabId, rootNode);
+    // 1. Base State
+    console.log("📸 Capturing Base State...");
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: [] }).catch(() => { })));
+    const baseTree = await captureTreeState(tabId, rootNode, null, true, false);
 
-    // 4. 获取尺寸
+    // 🔥 2. Hover State (使用增强版冻结逻辑)
+    console.log("📸 Capturing Hover State (Freezing)...");
+    await togglePageTransitions(tabId, true); // 🚫 核弹级禁用
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: ["hover"] }).catch(() => { })));
+
+    // 给浏览器一点时间应用样式和计算布局 (50ms 足够)
+    await new Promise(r => setTimeout(r, 50));
+
+    const hoverTree = await captureTreeState(tabId, rootNode, null, true, true);
+
+    // 3. Reset
+    await togglePageTransitions(tabId, false); // ✅ 恢复现场
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: [] }).catch(() => { })));
+
+    // 4. Merge
+    mergeHoverDiff(baseTree, hoverTree);
+
+    console.log("📝 Serializing...");
+    const htmlOutput = serializeTreeToHTML(baseTree);
+
+    // Loading & Layout
     let rootLayout = { width: "auto", height: "auto" };
     try {
       const boxModel = await sendDebuggerCommand(tabId, "DOM.getBoxModel", { nodeId: rootNode.nodeId });
-      if (boxModel && boxModel.model) {
-        rootLayout = { width: boxModel.model.width, height: boxModel.model.height };
-      }
+      if (boxModel?.model) rootLayout = { width: boxModel.model.width, height: boxModel.model.height };
     } catch (e) { }
 
-    // 5. 还原状态
-    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: [] }).catch((e) => { })));
+    const loadingComponent = `const Component = () => (<div className="flex flex-col items-center justify-center h-full p-8 text-slate-400"><div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div><div className="text-sm font-mono mt-4">AI Analyzing...</div></div>);`;
 
-    console.log("📝 Serializing...");
-    const htmlOutput = serializeTreeToHTML(finalTree);
-    console.log(`✅ Complete. HTML Length: ${htmlOutput.length}`);
-
-    // ============================================================
-    // 🔥 修复 1: 发送一个“合法的” React 组件作为 Loading 占位符
-    // ============================================================
-    // 这样 preview.html 就不会报 ReferenceError 了
-    const loadingComponent = `
-      const Component = () => {
-        return (
-          <div className="flex flex-col items-center justify-center h-full space-y-4 p-8 text-slate-400">
-            <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-            <div className="text-sm font-mono animate-pulse">AI is analyzing structure...</div>
-          </div>
-        );
-      };
-    `;
-
-    const broadcastPayload = {
-      type: "UPDATE_CODE_WITH_REAL_DATA",
-      code: loadingComponent,
-      layout: rootLayout
-    };
-
-    // 发送 Loading 状态 (多次尝试确保 Sidepanel 收到)
-    chrome.runtime.sendMessage(broadcastPayload).catch(() => { });
-    setTimeout(() => chrome.runtime.sendMessage(broadcastPayload).catch(() => { }), 500);
-
-    // 回复 content script (让遮罩层恢复)
+    chrome.runtime.sendMessage({ type: "UPDATE_CODE_WITH_REAL_DATA", code: loadingComponent, layout: rootLayout }).catch(() => { });
     sendResponse({ success: true, data: htmlOutput, layout: rootLayout });
 
-    // ============================================================
-    // 🔥 修复 2: 自动触发 AI (Internal Bridge)
-    // ============================================================
-    // 我们不需要等待 Content Script 再发请求，直接在这里调用 AI
-    console.log("🚀 Triggering AI Internally...");
-
-    // 创建一个“伪造”的 Port 对象，拦截 AI 的输出并转发给 Sidepanel
     let accumulatedText = "";
     const mockPort = {
       postMessage: (msg) => {
-        // 如果是流式片段
-        if (msg.type === "STREAM_CHUNK") {
-          accumulatedText += (msg.chunk || msg.text || "");
-          // 可选：实时把半成品代码发给 Sidepanel (这看起来很酷)
-          // chrome.runtime.sendMessage({ 
-          //    type: "UPDATE_CODE_WITH_REAL_DATA", 
-          //    code: accumulatedText, 
-          //    layout: rootLayout 
-          // }).catch(()=>{});
-        }
-        // 如果是完成信号
+        if (msg.type === "STREAM_CHUNK") accumulatedText += (msg.chunk || msg.text || "");
         if (msg.type === "STREAM_DONE" || (msg.success && msg.data)) {
-          const finalCode = msg.data || accumulatedText;
-          console.log("🤖 AI Finished. Broadcasting Code.");
-
-          // 发送最终代码给 Sidepanel
-          chrome.runtime.sendMessage({
-            type: "UPDATE_CODE_WITH_REAL_DATA",
-            code: finalCode,
-            layout: rootLayout
-          }).catch((err) => console.warn("Sidepanel closed?", err));
+          chrome.runtime.sendMessage({ type: "UPDATE_CODE_WITH_REAL_DATA", code: msg.data || accumulatedText, layout: rootLayout }).catch(() => { });
         }
       }
     };
 
-    // 立即执行 AI
     await handleGeminiTestStream({ styles: htmlOutput }, mockPort);
 
   } catch (error) {
@@ -253,7 +289,35 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   }
 }
 
-// 辅助：清洗 CSS
+function mergeHoverDiff(baseNode, hoverNode) {
+  if (!baseNode || !hoverNode) return;
+
+  if (baseNode.computedStyle && hoverNode.computedStyle) {
+    const diff = {};
+    const baseStyle = baseNode.computedStyle;
+    const hoverStyle = hoverNode.computedStyle;
+    let hasDiff = false;
+    const interactiveProps = ["color", "background-color", "border-color", "opacity", "transform", "box-shadow", "fill", "stroke"];
+
+    interactiveProps.forEach(prop => {
+      if (baseStyle[prop] !== hoverStyle[prop] && hoverStyle[prop]) {
+        diff[prop] = hoverStyle[prop];
+        hasDiff = true;
+      }
+    });
+
+    if (hasDiff) {
+      baseNode.hoverDiff = diff;
+    }
+  }
+
+  if (baseNode.children && hoverNode.children && baseNode.children.length === hoverNode.children.length) {
+    for (let i = 0; i < baseNode.children.length; i++) {
+      mergeHoverDiff(baseNode.children[i], hoverNode.children[i]);
+    }
+  }
+}
+
 function purifyCssText(cssText) {
   if (!cssText) return "";
   return cssText
@@ -262,8 +326,7 @@ function purifyCssText(cssText) {
     .replace(/(align|justify)-self\s*:[^;]+;?/gi, '');
 }
 
-// 递归采集
-async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot = true) {
+async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot = true, isHovering = false) {
   if (!node) return null;
   if (node.nodeType === 3) return node.nodeValue.trim() ? { type: "text", content: node.nodeValue.trim() } : null;
   if (node.nodeType !== 1) return null;
@@ -277,9 +340,13 @@ async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot 
   let currentComputedStyle = styles.computedStyle;
 
   if (isRoot) {
-    // 根节点净化
-    ["margin", "top", "left", "right", "bottom", "alignSelf", "justifySelf"].forEach(k => delete currentComputedStyle[k]);
-    ["marginTop", "marginBottom", "marginLeft", "marginRight"].forEach(k => delete currentComputedStyle[k]);
+    const layoutPollution = [
+      "margin", "margin-top", "margin-bottom", "margin-left", "margin-right",
+      "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
+      "top", "left", "right", "bottom", "inset",
+      "align-self", "justify-self", "flex", "grid-area"
+    ];
+    layoutPollution.forEach(k => delete currentComputedStyle[k]);
 
     if (styles.matchedRules) {
       styles.matchedRules = styles.matchedRules.map(rule => {
@@ -298,7 +365,17 @@ async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot 
         .replace(/style="[^"]*"/gi, '')
         .replace(/width="[^"]*"/gi, '')
         .replace(/height="[^"]*"/gi, '');
-      let cleanStyle = `width:${currentComputedStyle.width};height:${currentComputedStyle.height};${currentComputedStyle.color ? `color:${currentComputedStyle.color};fill:currentColor;` : ''}`;
+
+      let styleParts = [];
+      for (const [k, v] of Object.entries(currentComputedStyle)) {
+        if (!k.startsWith('font-') && !k.startsWith('line-') && !k.startsWith('text-')) {
+          styleParts.push(`${k}:${v}`);
+        }
+      }
+      if (currentComputedStyle.color && !styleParts.some(s => s.startsWith('color:'))) styleParts.push(`color:${currentComputedStyle.color}`);
+      if (currentComputedStyle.fill && !styleParts.some(s => s.startsWith('fill:'))) styleParts.push(`fill:${currentComputedStyle.fill}`);
+
+      const cleanStyle = styleParts.join(';');
       return { type: "svg_raw", html: svgHtml.replace('<svg', `<svg style="${cleanStyle}"`), computedStyle: currentComputedStyle };
     } catch (e) { return null; }
   }
@@ -306,13 +383,17 @@ async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot 
   const children = [];
   if (node.pseudoElements) {
     for (const pseudo of node.pseudoElements) {
-      const processed = await captureTreeState(tabId, pseudo, currentComputedStyle, false);
-      if (processed) { processed.isPseudo = true; children.push(processed); }
+      const processed = await captureTreeState(tabId, pseudo, currentComputedStyle, false, isHovering);
+      // 🔥 V60.22 回滚：保留所有伪元素，不做人为过滤
+      if (processed) {
+        processed.isPseudo = true;
+        children.push(processed);
+      }
     }
   }
   if (node.children) {
     for (const child of node.children) {
-      const processed = await captureTreeState(tabId, child, currentComputedStyle, false);
+      const processed = await captureTreeState(tabId, child, currentComputedStyle, false, isHovering);
       if (processed) children.push(processed);
     }
   }
@@ -356,16 +437,11 @@ async function fetchStylesForNode(tabId, nodeId, parentComputedStyle, isRoot = f
     const computedResult = await sendDebuggerCommand(tabId, "CSS.getComputedStyleForNode", { nodeId });
     if (computedResult) {
       result.computedStyle = processComputedStyle(computedResult.computedStyle, parentComputedStyle, isRoot);
-      // Root Vars Rescue
       if (isRoot) {
         const allVars = {};
         computedResult.computedStyle.forEach(p => { if (p.name.startsWith('--')) allVars[p.name] = p.value; });
         if (Object.keys(allVars).length > 0) {
-          result.matchedRules.push({
-            selector: ":root",
-            cssText: Object.entries(allVars).map(([k, v]) => `${k}: ${v}`).join('; '),
-            type: "RootVars"
-          });
+          result.matchedRules.push({ selector: ":root", cssText: Object.entries(allVars).map(([k, v]) => `${k}: ${v}`).join('; '), type: "RootVars" });
         }
       }
     }
@@ -419,8 +495,14 @@ function serializeTreeToHTML(node) {
 
   const tagName = node.tagName;
   const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => `${k}:${v}`).join(";");
-  let rulesAttr = "", varsAttr = "";
 
+  let hoverDiffAttr = "";
+  if (node.hoverDiff) {
+    const diffString = Object.entries(node.hoverDiff).map(([k, v]) => `${k}:${v}`).join(";");
+    hoverDiffAttr = ` data-hover-diff="${diffString}"`;
+  }
+
+  let rulesAttr = "", varsAttr = "";
   if (node.matchedRules) {
     let ownCss = "", inheritedVars = "";
     node.matchedRules.forEach(r => {
@@ -444,23 +526,37 @@ function serializeTreeToHTML(node) {
   }
 
   const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : "";
-  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${rulesAttr}${varsAttr}${otherAttrs}>${node.children.map(serializeTreeToHTML).join('')}</${tagName}>`;
+  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${hoverDiffAttr}${rulesAttr}${varsAttr}${otherAttrs}>${node.children.map(serializeTreeToHTML).join('')}</${tagName}>`;
 }
 
-function processComputedStyle(cdpStyleArray, parentStyleObj = null, isRoot = false) {
+function processComputedStyle(cdpArray, parentObj = null, isRoot = false) {
   const styleObj = {};
-  const mustKeep = new Set(["display", "position", "width", "height", "top", "left", "bottom", "right", "z-index", "opacity", "transform", "margin", "padding"]);
-  const isGarbage = (name, value) => {
-    if (name.startsWith("--")) return !isRoot;
-    if (name.startsWith("-webkit") || value === "auto" || value === "normal" || value === "none" || value === "0px" || value === "transparent") return true;
-    return false;
-  };
 
-  cdpStyleArray.forEach(p => {
-    if (!mustKeep.has(p.name) && isGarbage(p.name, p.value)) return;
-    if (parentStyleObj && parentStyleObj[p.name] === p.value) return; // Simple inheritance check
-    styleObj[p.name] = p.value;
+  const blocklist = new Set([
+    "text-rendering", "zoom", "mix-blend-mode"
+  ]);
+
+  cdpArray.forEach(p => {
+    const k = p.name;
+    const v = p.value;
+
+    if (blocklist.has(k)) return;
+
+    if (k.startsWith("-webkit-") && !k.includes("line-clamp") && !k.includes("box-orient") && !k.includes("text-fill-color")) return;
+    if (k.startsWith("-moz-") || k.startsWith("-ms-")) return;
+
+    if (v === "auto" || v === "none" || v === "normal" || v === "0px" || v === "rgba(0, 0, 0, 0)" || v === "transparent" || v === "initial") {
+      if (v === "0px" && (k.includes("margin") || k.includes("padding") || k.includes("border-width"))) return;
+      if (v === "0px" && (k === "top" || k === "left" || k === "right" || k === "bottom")) { /* keep */ } else if (v === "0px") return;
+      if (v === "none" && k !== "display" && k !== "max-width" && k !== "max-height") return;
+      if (v === "auto" && k !== "overflow") return;
+    }
+
+    if (parentObj && parentObj[k] === v) return;
+
+    styleObj[k] = v;
   });
+
   return styleObj;
 }
 

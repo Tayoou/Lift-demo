@@ -6,54 +6,94 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Preview Sandbox</title>
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="lib/tailwindcss.js"></script>
   <script>
-    tailwind.config = {
-      theme: { extend: { colors: { clifford: "#da373d" } } },
-    };
+    tailwind.config = { theme: { extend: { colors: { clifford: "#da373d" } } } };
   </script>
 
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
+  <script src="lib/react.development.js"></script>
+  <script src="lib/react-dom.development.js"></script>
+  <script src="lib/babel.min.js"></script>
   <script src="html-to-image.js"></script>
 
   <style>
     body {
       margin: 0;
-      /* 给组件留出呼吸空间，防止贴边 */
       padding: 40px;
       min-height: 100vh;
       background-color: #f8fafc;
-      /* 默认背景 */
       display: flex;
       justify-content: center;
       align-items: flex-start;
-      /* 关键：顶部对齐，防止高度变化时组件垂直跳动 */
-      transition: background-color 0.2s ease;
+      transition: background 0.2s;
       box-sizing: border-box;
     }
 
     #root {
-      /* 🔥 核心修复 1: 切换盒子模型为 content-box */
-      /* 这样 padding 不会占用 width 的空间，width 依然精准控制内容区 */
       box-sizing: content-box;
-
-      /* 🔥 核心修复 2: 增加 24px 内边距 (呼吸感/防裁剪) */
-      /* 这能确保组件的阴影 (Shadow) 和 Hover 放大效果不被切掉 */
       padding: 24px;
-
       width: 100%;
-      height: auto;
-
-      display: block;
-      transition: all 0.3s ease;
-      transform-origin: top center;
       position: relative;
+      transition: all 0.3s;
+      /* 🔥 让组件在约束框内居中 */
+      margin: 0 auto;
     }
 
-    /* Error Display */
+    /* Edit Mode */
+    .edit-mode-active .editable-text {
+      outline: 2px dashed #3b82f6 !important;
+      cursor: text !important;
+    }
+
+    .edit-mode-active .editable-text:hover {
+      background: rgba(59, 130, 246, 0.1);
+    }
+
+    .edit-mode-active a {
+      cursor: text !important;
+      pointer-events: none;
+    }
+
+    /* Loading Overlay */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(4px);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    #loading-overlay.active {
+      display: flex;
+    }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #e2e8f0;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .loading-text {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 500;
+      font-family: sans-serif;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
     .error-box {
       padding: 1rem;
       background-color: #fee2e2;
@@ -65,27 +105,16 @@
       white-space: pre-wrap;
       word-break: break-all;
     }
-
-    /* Edit Mode Indicators */
-    .edit-mode-active .editable-text {
-      outline: 2px dashed #3b82f6 !important;
-      outline-offset: 2px;
-      cursor: text !important;
-      border-radius: 2px;
-    }
-
-    .edit-mode-active .editable-text:hover {
-      background: rgba(59, 130, 246, 0.1);
-    }
-
-    .edit-mode-active a {
-      cursor: text !important;
-      pointer-events: none;
-    }
   </style>
 </head>
 
 <body>
+
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">AI is coding...</div>
+  </div>
+
   <div id="root"></div>
 
   <script>
@@ -93,121 +122,69 @@
     let reactRoot = null;
     let isEditMode = false;
 
-    // ==========================================
-    // 1. Screenshot Logic
-    // ==========================================
-    function captureScreenshot() {
-      const node = document.getElementById('root');
+    window.addEventListener("message", (event) => {
+      const { type, code, layout, key, value, color, enable } = event.data;
 
-      if (typeof htmlToImage === 'undefined') {
-        console.error("❌ html-to-image.js 未加载！");
-        window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
-        return;
+      if (type === "SHOW_LOADING") document.getElementById("loading-overlay").classList.add("active");
+
+      if (type === "RENDER") {
+        document.getElementById("loading-overlay").classList.remove("active");
+        applyLayout(layout);
+        renderCode(code);
       }
 
-      if (!node) {
-        window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
-        return;
+      if (type === "UPDATE_STYLE") {
+        if (key === "fontFamily") loadGoogleFont(value);
+        document.getElementById("root").style.setProperty(key, value);
       }
 
-      // 截图前暂时关闭编辑模式的高亮框
-      const wasEditMode = isEditMode;
-      if (wasEditMode) {
-        document.body.classList.remove("edit-mode-active");
-      }
-
-      // 获取当前 body 背景色作为图片背景
-      const currentBg = getComputedStyle(document.body).backgroundColor;
-
-      htmlToImage.toPng(node, {
-        quality: 0.95,
-        backgroundColor: currentBg,
-        style: { margin: 0 }, // 不需要 margin，因为 #root 已经有 padding
-        skipOnError: true, // 忽略跨域图片错误
-        preferredFontFormat: 'woff2',
-        fontEmbedCSS: '', // 禁用字体嵌入以避免跨域报错
-        filter: (domNode) => {
-          return !domNode.classList?.contains('ignore-screenshot');
-        }
-      })
-        .then(function (dataUrl) {
-          if (wasEditMode) document.body.classList.add("edit-mode-active");
-          window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: dataUrl }, "*");
-        })
-        .catch(function (error) {
-          console.error('Screenshot warning:', error);
-          if (wasEditMode) document.body.classList.add("edit-mode-active");
-          window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
-        });
-    }
-
-    // ==========================================
-    // 2. Edit Mode (Text Editing)
-    // ==========================================
-    function toggleEditMode(enable) {
-      isEditMode = enable;
-      const root = document.getElementById("root");
-      if (!root) return;
-
-      if (enable) {
-        document.body.classList.add("edit-mode-active");
-        wrapTextNodes(root);
-      } else {
-        document.body.classList.remove("edit-mode-active");
-        unwrapTextNodes(root);
-      }
-    }
-
-    function wrapTextNodes(el) {
-      const nodes = Array.from(el.childNodes);
-      nodes.forEach(node => {
-        if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0) {
-          const span = document.createElement('span');
-          span.contentEditable = "true";
-          span.className = "editable-text";
-          span.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
-          span.setAttribute("data-original-text", node.nodeValue);
-          node.parentNode.insertBefore(span, node);
-          span.appendChild(node);
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-          if (!node.classList.contains('editable-text') && node.tagName !== 'svg') {
-            wrapTextNodes(node);
-          }
-        }
-      });
-    }
-
-    function unwrapTextNodes(root) {
-      const editables = root.querySelectorAll('.editable-text');
-      editables.forEach(span => {
-        while (span.firstChild) {
-          span.parentNode.insertBefore(span.firstChild, span);
-        }
-        span.parentNode.removeChild(span);
-      });
-      root.normalize();
-    }
-
-    document.addEventListener("focusout", (e) => {
-      if (!isEditMode) return;
-      const target = e.target;
-      if (target.classList.contains("editable-text")) {
-        const oldText = target.getAttribute("data-original-text");
-        const newText = target.innerText;
-        if (oldText && newText !== oldText) {
-          target.setAttribute("data-original-text", newText);
-          window.top.postMessage({
-            type: "UPDATE_TEXT_CONTENT",
-            oldText: oldText,
-            newText: newText
-          }, "*");
-        }
-      }
+      if (type === "UPDATE_CANVAS_BG") document.body.style.backgroundColor = color;
+      if (type === "TOGGLE_EDIT_MODE") toggleEditMode(enable);
+      if (type === "GET_SCREENSHOT") captureScreenshot();
     });
 
-    // ==========================================
-    // 3. Renderer & Layout
-    // ==========================================
+    function renderCode(rawCode) {
+      try {
+        let code = rawCode.replace(/import\s+.*?from\s+['"].*?['"];?/g, "").replace(/export\s+default\s+/g, "");
+        if (code.trim().startsWith("<")) code = `const Component = () => (\n${code}\n);`;
+
+        const codeToRun = `
+          ${code}
+          let Target = null;
+          try { if (typeof Component !== 'undefined') Target = Component; } catch(e){}
+          try { if (typeof App !== 'undefined') Target = App; } catch(e){}
+          Target;
+        `;
+
+        const compiled = Babel.transform(codeToRun, { presets: ["react"] }).code;
+        const Component = eval(compiled);
+
+        if (!reactRoot) reactRoot = ReactDOM.createRoot(rootElement);
+        reactRoot.render(React.createElement(Component));
+      } catch (err) {
+        console.error(err);
+        document.getElementById("loading-overlay").classList.remove("active");
+        rootElement.innerHTML = `<div class="error-box">Render Error: ${err.message}</div>`;
+      }
+    }
+
+    // 🔥 核心修复: 布局约束
+    function applyLayout(layout) {
+      if (layout && layout.width && layout.width !== "auto") {
+        rootElement.style.width = `${layout.width}px`;
+        // 🔥 使用 border 而不是 outline，更加稳定
+        rootElement.style.border = "2px dashed #cbd5e1";
+        rootElement.style.borderRadius = "8px";
+      } else {
+        rootElement.style.width = "100%";
+        rootElement.style.border = "none";
+      }
+      // 最小高度也需要被尊重，防止组件塌陷
+      if (layout && layout.height && layout.height !== "auto") {
+        rootElement.style.minHeight = `${layout.height}px`;
+      }
+    }
+
     function loadGoogleFont(fontName) {
       if (!fontName) return;
       const cleanName = fontName.split(',')[0].replace(/['"]/g, '').trim();
@@ -215,105 +192,70 @@
       const id = `font-${cleanName.replace(/\s+/g, '-')}`;
       if (document.getElementById(id)) return;
       const link = document.createElement('link');
-      link.id = id;
-      link.rel = 'stylesheet';
+      link.id = id; link.rel = 'stylesheet';
       link.href = `https://fonts.googleapis.com/css2?family=${cleanName.replace(/\s+/g, '+')}:wght@400;500;700&display=swap`;
       document.head.appendChild(link);
     }
 
-    // Polyfill for React variable if needed
-    if (window.React) {
-      Object.keys(window.React).forEach((key) => { window[key] = window.React[key]; });
+    function captureScreenshot() {
+      const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+      htmlToImage.toPng(document.getElementById('root'), {
+        backgroundColor: getComputedStyle(document.body).backgroundColor,
+        skipOnError: true,
+        cacheBust: true,
+        imagePlaceholder: placeholder,
+        fetchRequestInit: { mode: 'no-cors' },
+        style: { margin: 0 }
+      })
+        .then(dataUrl => window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl }, "*"))
+        .catch(err => {
+          console.warn("Capture failed:", err);
+          window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
+        });
     }
 
-    // 🔥 Message Listener
-    window.addEventListener("message", (event) => {
-      const { type, code, layout, key, value, enable, color } = event.data;
+    function toggleEditMode(enable) {
+      isEditMode = enable;
+      document.body.classList.toggle("edit-mode-active", enable);
+      const root = document.getElementById("root");
+      if (enable) wrapTextNodes(root);
+      else unwrapTextNodes(root);
+    }
 
-      // 1. 渲染代码
-      if (type === "RENDER") {
-        if (typeof Babel === "undefined") {
-          setTimeout(() => window.postMessage(event.data, "*"), 100);
-          return;
+    function wrapTextNodes(el) {
+      Array.from(el.childNodes).forEach(node => {
+        if (node.nodeType === 3 && node.nodeValue.trim().length > 0) {
+          const span = document.createElement('span');
+          span.contentEditable = "true"; span.className = "editable-text";
+          span.onclick = e => { e.preventDefault(); e.stopPropagation(); };
+          span.setAttribute("data-original-text", node.nodeValue);
+          node.parentNode.insertBefore(span, node);
+          span.appendChild(node);
+        } else if (node.nodeType === 1 && !node.classList.contains('editable-text')) {
+          wrapTextNodes(node);
         }
-        applyLayoutConstraints(layout);
-        renderCode(code);
-      }
+      });
+    }
 
-      // 2. 更新布局
-      if (type === "UPDATE_LAYOUT") applyLayoutConstraints(layout);
+    function unwrapTextNodes(root) {
+      root.querySelectorAll('.editable-text').forEach(span => {
+        while (span.firstChild) span.parentNode.insertBefore(span.firstChild, span);
+        span.parentNode.removeChild(span);
+      });
+      root.normalize();
+    }
 
-      // 3. 更新样式变量
-      if (type === "UPDATE_STYLE") {
-        const root = document.getElementById("root");
-        if (root) {
-          if (key === "fontFamily" || key === "font-family") loadGoogleFont(value);
-          root.style.setProperty(key, value);
+    document.addEventListener("focusout", (e) => {
+      if (!isEditMode) return;
+      if (e.target.classList.contains("editable-text")) {
+        const oldText = e.target.getAttribute("data-original-text");
+        const newText = e.target.innerText;
+        if (oldText && newText !== oldText) {
+          e.target.setAttribute("data-original-text", newText);
+          window.top.postMessage({ type: "UPDATE_TEXT_CONTENT", oldText, newText }, "*");
         }
       }
-
-      // 4. 编辑模式
-      if (type === "TOGGLE_EDIT_MODE") toggleEditMode(enable);
-
-      // 5. 更新画布背景
-      if (type === "UPDATE_CANVAS_BG") {
-        document.body.style.backgroundColor = color;
-      }
-
-      // 6. 截图指令
-      if (type === "GET_SCREENSHOT") captureScreenshot();
     });
-
-    // 🔥 核心逻辑修复：应用高度约束
-    function applyLayoutConstraints(layout) {
-      // A. 宽度控制
-      // 注意：由于 #root 设置了 box-sizing: content-box，padding 不会挤占这里的 width
-      if (layout && layout.width) {
-        rootElement.style.width = `${layout.width}px`;
-        rootElement.style.outline = "1px dashed #cbd5e1";
-      } else {
-        rootElement.style.width = "100%";
-        rootElement.style.outline = "none";
-      }
-
-      // B. 高度控制 (Fix jumping border)
-      // 使用采集到的真实高度设置 min-height，确保虚线框紧贴组件
-      if (layout && layout.height) {
-        rootElement.style.minHeight = `${layout.height}px`;
-      } else {
-        rootElement.style.minHeight = "auto";
-      }
-
-      rootElement.style.boxShadow = "none";
-    }
-
-    function renderCode(rawCode) {
-      try {
-        let processedCode = rawCode
-          .replace(/import\s+.*?from\s+['"].*?['"];?/g, "")
-          .replace(/export\s+default\s+/g, "");
-
-        // 简单的 React 组件包装器
-        const codeToRun = `
-            ${processedCode}
-            let TargetComponent = null;
-            if (typeof App !== 'undefined') TargetComponent = App;
-            else if (typeof ProductFeatureCard !== 'undefined') TargetComponent = ProductFeatureCard;
-            else if (typeof Component !== 'undefined') TargetComponent = Component;
-            TargetComponent; 
-          `;
-
-        const compiledCode = Babel.transform(codeToRun, { presets: ["react"] }).code;
-        const Component = eval(compiledCode);
-
-        if (!Component) throw new Error("无法找到可渲染的组件。");
-        if (!reactRoot) reactRoot = ReactDOM.createRoot(rootElement);
-        reactRoot.render(React.createElement(Component));
-      } catch (err) {
-        console.error("Preview Render Error:", err);
-        rootElement.innerHTML = `<div class="error-box"><strong>渲染错误:</strong><br/>${err.message}</div>`;
-      }
-    }
   </script>
 </body>
 
