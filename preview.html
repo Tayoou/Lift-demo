@@ -17,26 +17,47 @@
   <script src="html-to-image.js"></script>
 
   <style>
+    /* 全局布局：让画布居中 */
+    html,
     body {
       margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    body {
       padding: 40px;
-      min-height: 100vh;
+      /* 给拖拽留出空间 */
       background-color: #f8fafc;
+      /* 🔥 关键布局：允许内容撑开容器，实现横向滚动 */
       display: flex;
-      justify-content: center;
       align-items: flex-start;
-      transition: background 0.2s;
+      justify-content: flex-start;
+      overflow: auto;
       box-sizing: border-box;
     }
 
+    /* 核心容器 */
     #root {
       box-sizing: content-box;
-      padding: 24px;
-      width: 100%;
+      /* 初始默认值，会被 JS 覆盖 */
+      min-width: 20px;
+
+      /* 🔥 核心：高度完全由内容决定，不可手动调整 */
+      height: auto !important;
+      min-height: auto !important;
+
+      /* 🔥 核心：自动居中魔法 (在 Flex 容器中) */
+      margin: auto;
+      /* 🔥 核心：防止父级挤压 */
+      flex-shrink: 0;
+
       position: relative;
-      transition: all 0.3s;
-      /* 🔥 让组件在约束框内居中 */
-      margin: 0 auto;
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      user-select: none;
+      transition: none;
     }
 
     /* Edit Mode */
@@ -122,12 +143,76 @@
     let reactRoot = null;
     let isEditMode = false;
 
+    // ==========================================
+    // 1. 拖拽逻辑 (仅允许调整宽度)
+    // ==========================================
+    const BORDER_SIZE = 12;
+    let isResizing = false;
+    // 不需要 currentResizer 变量了，因为只有一种模式：右侧拖拽
+
+    // 辅助：停止拖拽
+    function stopDrag() {
+      if (isResizing) {
+        isResizing = false;
+        rootElement.style.cursor = "default";
+        document.body.style.cursor = "default";
+      }
+    }
+
+    document.addEventListener("mousemove", (e) => {
+      if (isResizing) {
+        handleDrag(e);
+      } else {
+        if (!isEditMode) handleHover(e);
+      }
+    });
+
+    document.addEventListener("mousedown", (e) => {
+      // 只有当鼠标样式变为 ew-resize 时才允许拖拽
+      if (rootElement.style.cursor === "ew-resize" && !isEditMode) {
+        isResizing = true;
+        e.preventDefault();
+        document.body.style.cursor = "ew-resize";
+      }
+    });
+
+    // 🔥 核心修复：多重保险防止粘滞
+    document.addEventListener("mouseup", stopDrag);
+    document.addEventListener("mouseleave", stopDrag);
+    window.addEventListener("blur", stopDrag);
+
+    function handleHover(e) {
+      const rect = rootElement.getBoundingClientRect();
+      const x = e.clientX;
+      const y = e.clientY;
+
+      // 仅检测右边缘
+      const onRightEdge = x >= rect.right - BORDER_SIZE && x <= rect.right + BORDER_SIZE && y >= rect.top && y <= rect.bottom;
+
+      if (onRightEdge) {
+        rootElement.style.cursor = "ew-resize";
+      } else {
+        rootElement.style.cursor = "default";
+      }
+    }
+
+    function handleDrag(e) {
+      const rect = rootElement.getBoundingClientRect();
+      // 计算新宽度：鼠标当前X - 元素左侧X
+      const newWidth = e.clientX - rect.left;
+      if (newWidth > 50) {
+        rootElement.style.width = `${newWidth}px`;
+      }
+    }
+
+    // ==========================================
+    // 2. 消息通信与渲染逻辑
+    // ==========================================
     window.addEventListener("message", (event) => {
       const { type, code, layout, key, value, color, enable } = event.data;
 
       if (type === "SHOW_LOADING") {
         document.getElementById("loading-overlay").classList.add("active");
-        // 清空之前的内容，防止 React 冲突
         if (reactRoot) {
           reactRoot.unmount();
           reactRoot = null;
@@ -143,7 +228,6 @@
 
       if (type === "UPDATE_STYLE") {
         if (key === "fontFamily") loadGoogleFont(value);
-        // 直接更新 CSS 变量或样式
         document.getElementById("root").style.setProperty(key, value);
       }
 
@@ -154,7 +238,6 @@
 
     function renderCode(rawCode) {
       try {
-        // 简单的代码预处理
         let code = rawCode.replace(/import\s+.*?from\s+['"].*?['"];?/g, "").replace(/export\s+default\s+/g, "");
         if (code.trim().startsWith("<")) code = `const Component = () => (\n${code}\n);`;
 
@@ -178,18 +261,15 @@
       }
     }
 
+    // 布局应用：初始化时仅设置宽度
     function applyLayout(layout) {
       if (layout && layout.width && layout.width !== "auto") {
         rootElement.style.width = `${layout.width}px`;
-        rootElement.style.border = "2px dashed #cbd5e1";
-        rootElement.style.borderRadius = "8px";
       } else {
-        rootElement.style.width = "100%";
-        rootElement.style.border = "none";
+        rootElement.style.width = "auto";
       }
-      if (layout && layout.height && layout.height !== "auto") {
-        rootElement.style.minHeight = `${layout.height}px`;
-      }
+      // 高度始终由内容自动撑开，不再设置 minHeight
+      rootElement.style.height = "auto";
     }
 
     function loadGoogleFont(fontName) {
@@ -204,45 +284,40 @@
       document.head.appendChild(link);
     }
 
-    // 🔥 核心修复 V60.24: 截图逻辑重构
+    // 🔥 核心修复 V60.25: 截图逻辑
     async function captureScreenshot() {
       const root = document.getElementById("root");
       if (!root) return;
 
-      // 1. 暂时移除 Transform，防止截图偏移
       const originalTransform = root.style.transform;
       root.style.transform = "none";
+      const originalBorder = root.style.border;
+      root.style.border = "none";
 
-      // 2. 占位图 (防止透明图片报错)
       const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
       try {
         const dataUrl = await htmlToImage.toPng(root, {
           quality: 0.95,
           pixelRatio: 2,
-          // 🔥 关键修复：关闭缓存破坏，防止 400 Bad Request
           cacheBust: false,
-          // 🔥 关键修复：遇到跨域报错直接跳过，不要崩
           skipOnError: true,
           useCORS: true,
           imagePlaceholder: placeholder,
           filter: (node) => {
-            // 过滤掉无关元素
             return node.tagName !== 'LINK' && node.tagName !== 'SCRIPT';
           }
         });
 
-        // 3. 恢复 Transform
         root.style.transform = originalTransform;
+        root.style.border = originalBorder;
 
-        // 4. 发送结果
         window.parent.postMessage({ type: "SCREENSHOT_RESULT", dataUrl }, "*");
 
       } catch (error) {
         console.error("Capture failed:", error);
-        root.style.transform = originalTransform; // 确保出错也能恢复
-
-        // 即使失败，也发送空结果，防止 Loading 卡死
+        root.style.transform = originalTransform;
+        root.style.border = originalBorder;
         window.parent.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
       }
     }
