@@ -125,7 +125,15 @@
     window.addEventListener("message", (event) => {
       const { type, code, layout, key, value, color, enable } = event.data;
 
-      if (type === "SHOW_LOADING") document.getElementById("loading-overlay").classList.add("active");
+      if (type === "SHOW_LOADING") {
+        document.getElementById("loading-overlay").classList.add("active");
+        // 清空之前的内容，防止 React 冲突
+        if (reactRoot) {
+          reactRoot.unmount();
+          reactRoot = null;
+        }
+        rootElement.innerHTML = "";
+      }
 
       if (type === "RENDER") {
         document.getElementById("loading-overlay").classList.remove("active");
@@ -135,6 +143,7 @@
 
       if (type === "UPDATE_STYLE") {
         if (key === "fontFamily") loadGoogleFont(value);
+        // 直接更新 CSS 变量或样式
         document.getElementById("root").style.setProperty(key, value);
       }
 
@@ -145,6 +154,7 @@
 
     function renderCode(rawCode) {
       try {
+        // 简单的代码预处理
         let code = rawCode.replace(/import\s+.*?from\s+['"].*?['"];?/g, "").replace(/export\s+default\s+/g, "");
         if (code.trim().startsWith("<")) code = `const Component = () => (\n${code}\n);`;
 
@@ -168,18 +178,15 @@
       }
     }
 
-    // 🔥 核心修复: 布局约束
     function applyLayout(layout) {
       if (layout && layout.width && layout.width !== "auto") {
         rootElement.style.width = `${layout.width}px`;
-        // 🔥 使用 border 而不是 outline，更加稳定
         rootElement.style.border = "2px dashed #cbd5e1";
         rootElement.style.borderRadius = "8px";
       } else {
         rootElement.style.width = "100%";
         rootElement.style.border = "none";
       }
-      // 最小高度也需要被尊重，防止组件塌陷
       if (layout && layout.height && layout.height !== "auto") {
         rootElement.style.minHeight = `${layout.height}px`;
       }
@@ -197,21 +204,47 @@
       document.head.appendChild(link);
     }
 
-    function captureScreenshot() {
+    // 🔥 核心修复 V60.24: 截图逻辑重构
+    async function captureScreenshot() {
+      const root = document.getElementById("root");
+      if (!root) return;
+
+      // 1. 暂时移除 Transform，防止截图偏移
+      const originalTransform = root.style.transform;
+      root.style.transform = "none";
+
+      // 2. 占位图 (防止透明图片报错)
       const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-      htmlToImage.toPng(document.getElementById('root'), {
-        backgroundColor: getComputedStyle(document.body).backgroundColor,
-        skipOnError: true,
-        cacheBust: true,
-        imagePlaceholder: placeholder,
-        fetchRequestInit: { mode: 'no-cors' },
-        style: { margin: 0 }
-      })
-        .then(dataUrl => window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl }, "*"))
-        .catch(err => {
-          console.warn("Capture failed:", err);
-          window.top.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
+
+      try {
+        const dataUrl = await htmlToImage.toPng(root, {
+          quality: 0.95,
+          pixelRatio: 2,
+          // 🔥 关键修复：关闭缓存破坏，防止 400 Bad Request
+          cacheBust: false,
+          // 🔥 关键修复：遇到跨域报错直接跳过，不要崩
+          skipOnError: true,
+          useCORS: true,
+          imagePlaceholder: placeholder,
+          filter: (node) => {
+            // 过滤掉无关元素
+            return node.tagName !== 'LINK' && node.tagName !== 'SCRIPT';
+          }
         });
+
+        // 3. 恢复 Transform
+        root.style.transform = originalTransform;
+
+        // 4. 发送结果
+        window.parent.postMessage({ type: "SCREENSHOT_RESULT", dataUrl }, "*");
+
+      } catch (error) {
+        console.error("Capture failed:", error);
+        root.style.transform = originalTransform; // 确保出错也能恢复
+
+        // 即使失败，也发送空结果，防止 Loading 卡死
+        window.parent.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
+      }
     }
 
     function toggleEditMode(enable) {
