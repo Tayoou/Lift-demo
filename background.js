@@ -212,6 +212,49 @@ async function togglePageTransitions(tabId, disable) {
   } catch (e) { console.warn("Toggle transition failed", e); }
 }
 
+// ==========================================
+// 5. 调试工具：Token 爆炸分析器
+// ==========================================
+function debugTokenBloat(htmlString) {
+  const totalLen = htmlString.length;
+  console.group("🚨 Token Bloat Forensics (Token 爆炸取证)");
+  console.log(`📦 Payload Total Size: ${(totalLen / 1024).toFixed(2)} KB (approx ${Math.ceil(totalLen / 4)} tokens)`);
+
+  // 1. 检查 Base64 图片 (最常见的罪魁祸首)
+  const base64Matches = htmlString.match(/data:image\/[^;]+;base64,[^"']+/g) || [];
+  let base64Size = 0;
+  base64Matches.forEach(s => base64Size += s.length);
+  if (base64Matches.length > 0) {
+    console.warn(`⚠️ Found ${base64Matches.length} Base64 images.`);
+    console.warn(`🔥 Base64 Cost: ${(base64Size / 1024).toFixed(2)} KB (${((base64Size / totalLen) * 100).toFixed(1)}% of total)`);
+  } else {
+    console.log("✅ No inline Base64 images found.");
+  }
+
+  // 2. 检查 SVG 路径数据
+  const svgMatches = htmlString.match(/<svg[^>]*>[\s\S]*?<\/svg>/g) || [];
+  let svgSize = 0;
+  svgMatches.forEach(s => svgSize += s.length);
+  if (svgSize > 100 * 1024) { // 如果 SVG 总大小超过 100KB
+    console.warn(`⚠️ SVG Bloat detected. Total SVGs: ${svgMatches.length}`);
+    console.warn(`🔥 SVG Cost: ${(svgSize / 1024).toFixed(2)} KB`);
+  }
+
+  // 3. 检查 data-computed-style (样式冗余)
+  const styleMatches = htmlString.match(/data-computed-style="[^"]*"/g) || [];
+  let styleSize = 0;
+  styleMatches.forEach(s => styleSize += s.length);
+  console.warn(`📊 Computed Styles Cost: ${(styleSize / 1024).toFixed(2)} KB (${((styleSize / totalLen) * 100).toFixed(1)}% of total)`);
+
+  // 4. 检查 data-rules (CSS 规则冗余)
+  const ruleMatches = htmlString.match(/data-rules="[^"]*"/g) || [];
+  let ruleSize = 0;
+  ruleMatches.forEach(s => ruleSize += s.length);
+  console.warn(`📜 CSS Rules Cost: ${(ruleSize / 1024).toFixed(2)} KB`);
+
+  console.groupEnd();
+}
+
 async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   const tabId = sender.tab.id;
   const tabUrl = sender.tab.url;
@@ -258,6 +301,8 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
 
     console.log("📝 Serializing...");
     const htmlOutput = serializeTreeToHTML(baseTree, tabUrl);
+
+    debugTokenBloat(htmlOutput);
 
     // Loading & Layout
     let rootLayout = { width: "auto", height: "auto" };
@@ -489,48 +534,62 @@ async function fetchStylesForNode(tabId, nodeId, parentComputedStyle, isRoot = f
   return result;
 }
 
-/**
- * 将相对路径转换为绝对路径
- * @param {string} path - 原始路径 (e.g. /img/logo.png)
- * @param {string} baseUrl - 当前页面的 URL (e.g. https://wise.com/page)
- */
+// ==========================================
+// 4. 核心序列化 (🔥 V2.0: 包含 URL 补全 + Base64 抽脂)
+// ==========================================
+
 function makeUrlAbsolute(path, baseUrl) {
   if (!path) return path;
   if (path.startsWith("data:") || path.startsWith("blob:") || path.startsWith("http")) return path;
-
-  // 处理 //cdn.com 这种自适应协议
   if (path.startsWith("//")) return `https:${path}`;
+  try { return new URL(path, baseUrl).href; } catch (e) { return path; }
+}
 
-  try {
-    return new URL(path, baseUrl).href;
-  } catch (e) {
-    return path;
+/**
+ * ✂️ 新增辅助函数：Base64 截断器
+ * 如果字符串是 Base64 且超过 100 字符，直接截断，保留头部标记供 AI 识别
+ */
+function truncateBase64(value) {
+  if (!value || typeof value !== 'string') return value;
+
+  // 检查是否包含 data:image
+  if (value.includes("data:image")) {
+    // 如果长度超过 500 (通常 Base64 都几千几万)，才截断
+    if (value.length > 500) {
+      // 保留前 30 个字符让 AI 知道这是图片类型 (如 data:image/png;base64...)
+      return value.substring(0, 30) + "...[BASE64_IMAGE_DATA_TRUNCATED]...";
+    }
   }
+  return value;
 }
 
 function serializeTreeToHTML(node, baseUrl) {
   if (!node) return "";
   if (node.type === "text") return node.content;
 
-  // 1. 修改：处理 SVG Raw 模式 (如果有内部相对链接)
+  // 1. 处理 SVG Raw
   if (node.type === "svg_raw") {
     let html = node.html;
     if (baseUrl) {
-      // 简单的正则替换 SVG 内部可能的相对链接 (比如 <image href="...">)
-      html = html.replace(/(href|src)="([^"]+)"/g, (match, attr, val) => {
-        return `${attr}="${makeUrlAbsolute(val, baseUrl)}"`;
-      });
+      html = html.replace(/(href|src)="([^"]+)"/g, (match, attr, val) => `${attr}="${makeUrlAbsolute(val, baseUrl)}"`);
     }
     return html;
   }
 
   const tagName = node.tagName;
 
-  // 2. 修改：处理 Computed Style 里的背景图 URL
+  // 2. 处理 Computed Style (修复背景图里的 Base64)
   const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => {
-    if (baseUrl && v && v.includes('url(')) {
-      // 将 url('/bg.png') 替换为绝对路径
+    // A. 修复相对路径 URL
+    if (baseUrl && v && v.includes('url(') && !v.includes('data:')) {
       v = v.replace(/url\(['"]?(.+?)['"]?\)/g, (match, url) => `url('${makeUrlAbsolute(url, baseUrl)}')`);
+    }
+    // B. 🔥 核心：截断背景图里的 Base64
+    if (v && v.includes('data:image')) {
+      // 正则匹配 url('data:...') 并截断内容
+      v = v.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, (match, dataContent) => {
+        return `url('${truncateBase64(dataContent)}')`;
+      });
     }
     return `${k}:${v}`;
   }).join(";");
@@ -549,7 +608,12 @@ function serializeTreeToHTML(node, baseUrl) {
         const vars = r.cssText.split(";").filter(s => s.trim().startsWith("--")).join(";");
         if (vars) inheritedVars += vars + "; ";
       } else {
-        ownCss += `${r.selector} { ${r.cssText} } `;
+        // 🔥 也要防止 CSS 规则里混入 Base64
+        let safeCss = r.cssText;
+        if (safeCss.includes('data:image')) {
+          safeCss = safeCss.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
+        }
+        ownCss += `${r.selector} { ${safeCss} } `;
       }
     });
     if (ownCss) rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
@@ -563,18 +627,23 @@ function serializeTreeToHTML(node, baseUrl) {
 
       let finalValue = value;
 
-      // 3. 核心修改：处理关键属性的路径转换
-      if (baseUrl) {
-        if (key === "src" || key === "href") {
-          finalValue = makeUrlAbsolute(value, baseUrl);
-        }
-        if (key === "srcset") {
-          // 处理 "img1.png 1x, img2.png 2x" 格式
-          finalValue = value.split(',').map(part => {
-            const [url, desc] = part.trim().split(' ');
-            return `${makeUrlAbsolute(url, baseUrl)} ${desc || ''}`.trim();
-          }).join(', ');
-        }
+      // 3. 处理属性
+      if (baseUrl && (key === "src" || key === "href")) {
+        finalValue = makeUrlAbsolute(value, baseUrl);
+      }
+      if (baseUrl && key === "srcset") {
+        finalValue = value.split(',').map(part => {
+          const [url, desc] = part.trim().split(' ');
+          return `${makeUrlAbsolute(url, baseUrl)} ${desc || ''}`.trim();
+        }).join(', ');
+      }
+
+      // 🔥 核心：截断 src 或 srcset 里的 Base64
+      finalValue = truncateBase64(finalValue);
+
+      // 处理行内 style 属性里的 Base64
+      if (key === "style" && String(finalValue).includes('data:image')) {
+        finalValue = String(finalValue).replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
       }
 
       otherAttrs += ` ${key}="${String(finalValue).replace(/"/g, "&quot;")}"`;
@@ -582,8 +651,6 @@ function serializeTreeToHTML(node, baseUrl) {
   }
 
   const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : "";
-
-  // 4. 核心修改：递归调用时，必须把 baseUrl 传给子节点
   const childrenHtml = node.children.map(child => serializeTreeToHTML(child, baseUrl)).join('');
 
   return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${hoverDiffAttr}${rulesAttr}${varsAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
