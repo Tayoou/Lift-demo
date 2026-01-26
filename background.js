@@ -83,19 +83,23 @@ Task: Reconstruct the provided **Augmented HTML** into a responsive React compon
 Goal: 100% visual fidelity + 100% logical responsiveness.
 
 🚨 DATA SOURCE PROTOCOL (STRICT PRIORITY):
-1. **PRIORITY 1: \`data-rules\`**: Check CSS variables.
-2. **PRIORITY 2: \`style\` attribute**: This is the DEFAULT state.
-3. **PRIORITY 3: \`data-hover-diff\`**: Use for hover states.
+1. **PRIORITY 1: \`style\` attribute**: This is the DEFAULT state. (Contains computed styles)
+2. **PRIORITY 2: \`data-hover-diff\`**: Use for hover states.
 
 🎨 COLOR STRATEGY:
 - Base color: Read from \`style\`.
 - Hover color: Read from \`data-hover-diff\`.
 
 ✨ ANIMATION & LAYOUT:
-- **Retain Animations**: Look for transition/animation/transform properties.
+- **Retain Animations**: Look for transition/animation/transform properties in \`style\`.
 - **Freeze Time**: The input HTML reflects a "frozen" hover state. The values in \`data-hover-diff\` are the FINAL target values.
 - **DOM FIDELITY**: Trust the Input HTML hierarchy. If absolute layers (overlays/backgrounds) are siblings in the Input, keep them as **siblings** in React. Do NOT nest them inside other elements, otherwise transforms/opacity will stack incorrectly.
 - **PREVENT COLLAPSE**: If an \`absolute\` element uses \`padding-bottom\` (aspect ratio hack), YOU MUST give it explicit \`w-full\`.
+
+⚠️ CRITICAL SYNTAX RULES:
+1. **CLOSE ALL TAGS**: Ensure every opening tag (<div>, <section>, <footer>, etc.) has a matching closing tag.
+2. **NO TRUNCATION**: Do not truncate the code. Output the FULL component.
+3. **SVG HANDLING**: For complex SVGs, ensure strict XML validity.
 
 OUTPUT FORMAT:
 - Returns ONLY raw JSX code.
@@ -213,44 +217,39 @@ async function togglePageTransitions(tabId, disable) {
 }
 
 // ==========================================
-// 5. 调试工具：Token 爆炸分析器
+// 5. 调试工具：Base64 精确审计
 // ==========================================
 function debugTokenBloat(htmlString) {
   const totalLen = htmlString.length;
-  console.group("🚨 Token Bloat Forensics (Token 爆炸取证)");
-  console.log(`📦 Payload Total Size: ${(totalLen / 1024).toFixed(2)} KB (approx ${Math.ceil(totalLen / 4)} tokens)`);
+  console.group("⚖️ Base64 & Junk Forensics");
+  console.log(`📦 Total Payload: ${(totalLen / 1024).toFixed(2)} KB`);
 
-  // 1. 检查 Base64 图片 (最常见的罪魁祸首)
-  const base64Matches = htmlString.match(/data:image\/[^;]+;base64,[^"']+/g) || [];
-  let base64Size = 0;
-  base64Matches.forEach(s => base64Size += s.length);
-  if (base64Matches.length > 0) {
-    console.warn(`⚠️ Found ${base64Matches.length} Base64 images.`);
-    console.warn(`🔥 Base64 Cost: ${(base64Size / 1024).toFixed(2)} KB (${((base64Size / totalLen) * 100).toFixed(1)}% of total)`);
-  } else {
-    console.log("✅ No inline Base64 images found.");
+  // 1. 精确计算 Base64 占用
+  // 匹配 src="data:..." 或 url("data:...")
+  const base64Regex = /(?:src=|url\()['"]?(data:image\/[^;]+;base64,[^"'\)]+)['"]?\)?/g;
+  let match;
+  let totalBase64Size = 0;
+  let count = 0;
+
+  while ((match = base64Regex.exec(htmlString)) !== null) {
+    const content = match[1]; // 捕获 base64 内容
+    totalBase64Size += content.length;
+    count++;
   }
 
-  // 2. 检查 SVG 路径数据
-  const svgMatches = htmlString.match(/<svg[^>]*>[\s\S]*?<\/svg>/g) || [];
-  let svgSize = 0;
-  svgMatches.forEach(s => svgSize += s.length);
-  if (svgSize > 100 * 1024) { // 如果 SVG 总大小超过 100KB
-    console.warn(`⚠️ SVG Bloat detected. Total SVGs: ${svgMatches.length}`);
-    console.warn(`🔥 SVG Cost: ${(svgSize / 1024).toFixed(2)} KB`);
-  }
+  console.log(`🖼️ Base64 Images Count: ${count}`);
+  console.log(`🔥 Base64 Total Size: ${(totalBase64Size / 1024).toFixed(2)} KB`);
+  console.log(`📉 Base64 Ratio: ${((totalBase64Size / totalLen) * 100).toFixed(2)}%`);
 
-  // 3. 检查 data-computed-style (样式冗余)
-  const styleMatches = htmlString.match(/data-computed-style="[^"]*"/g) || [];
-  let styleSize = 0;
-  styleMatches.forEach(s => styleSize += s.length);
-  console.warn(`📊 Computed Styles Cost: ${(styleSize / 1024).toFixed(2)} KB (${((styleSize / totalLen) * 100).toFixed(1)}% of total)`);
-
-  // 4. 检查 data-rules (CSS 规则冗余)
-  const ruleMatches = htmlString.match(/data-rules="[^"]*"/g) || [];
-  let ruleSize = 0;
-  ruleMatches.forEach(s => ruleSize += s.length);
-  console.warn(`📜 CSS Rules Cost: ${(ruleSize / 1024).toFixed(2)} KB`);
+  // 2. 检查默认样式污染 (这是真正的罪魁祸首)
+  const junkProps = ["animation-composition", "font-feature-settings", "font-variant-ligatures", "math-depth", "text-size-adjust"];
+  let junkCount = 0;
+  junkProps.forEach(prop => {
+    const regex = new RegExp(prop, "g");
+    const found = (htmlString.match(regex) || []).length;
+    if (found > 0) console.warn(`⚠️ Junk Property '${prop}' found ${found} times!`);
+    junkCount += found;
+  });
 
   console.groupEnd();
 }
@@ -600,15 +599,13 @@ function serializeTreeToHTML(node, baseUrl) {
     hoverDiffAttr = ` data-hover-diff="${diffString}"`;
   }
 
-  let rulesAttr = "", varsAttr = "";
+  // 🔥 优化：彻底移除 data-rules 和 data-vars，AI 只依赖 Computed Style 还原视觉
+  let rulesAttr = "";
+  /*
   if (node.matchedRules) {
-    let ownCss = "", inheritedVars = "";
+    let ownCss = "";
     node.matchedRules.forEach(r => {
-      if (r.type === "Inherited") {
-        const vars = r.cssText.split(";").filter(s => s.trim().startsWith("--")).join(";");
-        if (vars) inheritedVars += vars + "; ";
-      } else {
-        // 🔥 也要防止 CSS 规则里混入 Base64
+      if (r.type !== "Inherited") {
         let safeCss = r.cssText;
         if (safeCss.includes('data:image')) {
           safeCss = safeCss.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
@@ -617,12 +614,13 @@ function serializeTreeToHTML(node, baseUrl) {
       }
     });
     if (ownCss) rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
-    if (inheritedVars) varsAttr = ` data-vars="${inheritedVars.replace(/"/g, "'").trim()}"`;
   }
+  */
 
   let otherAttrs = "";
   if (node.attributes) {
     Object.entries(node.attributes).forEach(([key, value]) => {
+      // 移除 class 和其他冗余属性
       if (key === "class" || key === "data-divmagic-id" || key === "style" || key.startsWith("on")) return;
 
       let finalValue = value;
@@ -650,35 +648,81 @@ function serializeTreeToHTML(node, baseUrl) {
     });
   }
 
-  const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : "";
+  // const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : ""; // 移除 class
   const childrenHtml = node.children.map(child => serializeTreeToHTML(child, baseUrl)).join('');
 
-  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${hoverDiffAttr}${rulesAttr}${varsAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
+  // 这里的 style 属性已经是清洗过的 computedString，非常干净
+  return `<${tagName} style="${computedString}"${hoverDiffAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
 }
 
 function processComputedStyle(cdpArray, parentObj = null, isRoot = false) {
   const styleObj = {};
 
-  const blocklist = new Set([
-    "text-rendering", "zoom", "mix-blend-mode"
+  // 🛑 精准黑名单：只屏蔽日志里出现的那些毫无意义的浏览器默认值
+  const blockList = new Set([
+    // 1. 逻辑属性 (Logical Properties) - Tailwind 主要使用物理属性，这些是冗余的
+    "block-size", "min-block-size", "max-block-size",
+    "inline-size", "min-inline-size", "max-inline-size",
+    "border-block-end-color", "border-block-end-style", "border-block-end-width",
+    "border-block-start-color", "border-block-start-style", "border-block-start-width",
+    "border-inline-end-color", "border-inline-end-style", "border-inline-end-width",
+    "border-inline-start-color", "border-inline-start-style", "border-inline-start-width",
+    "border-block-color", "border-block-style", "border-block-width",
+    "border-inline-color", "border-inline-style", "border-inline-width",
+    "margin-block-end", "margin-block-start", "margin-inline-end", "margin-inline-start",
+    "padding-block-end", "padding-block-start", "padding-inline-end", "padding-inline-start",
+    "inset-block-end", "inset-block-start", "inset-inline-end", "inset-inline-start",
+    "overflow-block", "overflow-inline", "overscroll-behavior-block", "overscroll-behavior-inline",
+    
+    // 2. 渲染引擎内部默认值 / 极少使用的属性
+    "animation-composition", "animation-play-state", "animation-range-end", "animation-range-start", "animation-timeline",
+    "background-blend-mode", "background-origin", "buffered-rendering", "break-after", "break-before", "break-inside",
+    "color-interpolation", "color-interpolation-filters", "color-rendering", "clip-rule", "caret-color", "column-fill", "column-rule-color", "column-rule-width",
+    "font-feature-settings", "font-language-override", "font-optical-sizing", "font-palette", "font-kerning", "font-variation-settings",
+    "font-synthesis", "font-variant", "font-variant-alternates", "font-variant-caps", "font-variant-east-asian",
+    "font-variant-emoji", "font-variant-ligatures", "font-variant-numeric", "font-variant-position", 
+    "forced-color-adjust", "grid-auto-columns", "grid-auto-rows", "hyphens", "hyphenate-limit-chars",
+    "image-orientation", "image-rendering", "isolation", "interpolate-size",
+    "line-break", "math-depth", "math-style", "mask-type", "mix-blend-mode", "marker", "mask-clip", "mask-composite", "mask-mode", "mask-origin", "mask-repeat",
+    "object-position", "offset-distance", "offset-rotate", "offset-path",
+    "overflow-anchor", "overflow-clip-margin", "overlay", "paint-order", "perspective", "perspective-origin",
+    "r", "rx", "ry", "ruby-position", "ruby-align", // SVG 半径等默认值
+    "scroll-behavior", "scroll-margin", "scroll-margin-block", "scroll-margin-inline", "scroll-margin-bottom", "scroll-margin-top", "scroll-margin-left", "scroll-margin-right",
+    "scroll-padding", "scroll-padding-block", "scroll-padding-inline", "scroll-padding-bottom", "scroll-padding-top", "scroll-padding-left", "scroll-padding-right",
+    "scroll-snap-align", "scroll-snap-stop", "scroll-snap-type", "scroll-timeline-axis",
+    "shape-image-threshold", "shape-margin", "shape-outside", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stop-color", "stop-opacity",
+    "text-decoration-skip-ink", "text-decoration-style", "text-decoration-color", "text-emphasis-color", "text-emphasis-position", "text-orientation", "text-rendering", "text-size-adjust", "text-spacing-trim", "touch-action", "text-anchor", "text-wrap-mode",
+    "vector-effect", "writing-mode", "widows", "will-change", "white-space-collapse",
+    "zoom",
+
+    // 3. Webkit 前缀垃圾
+    "-webkit-font-smoothing", "-webkit-locale", "-webkit-text-orientation", "-webkit-writing-mode", "-webkit-ruby-position", "-webkit-text-fill-color", "-webkit-tap-highlight-color", "-webkit-print-color-adjust", "-webkit-text-stroke", "-webkit-text-stroke-color", "-webkit-text-stroke-width", "-webkit-text-security", "-webkit-user-drag", "-webkit-user-modify"
   ]);
 
   cdpArray.forEach(p => {
     const k = p.name;
     const v = p.value;
 
-    if (blocklist.has(k)) return;
+    // 1. 黑名单拦截
+    if (blockList.has(k)) return;
+    if (k.startsWith("-webkit-") && !k.includes("line-clamp")) return; // 只保留 line-clamp
 
-    if (k.startsWith("-webkit-") && !k.includes("line-clamp") && !k.includes("box-orient") && !k.includes("text-fill-color")) return;
-    if (k.startsWith("-moz-") || k.startsWith("-ms-")) return;
-
-    if (v === "auto" || v === "none" || v === "normal" || v === "0px" || v === "rgba(0, 0, 0, 0)" || v === "transparent" || v === "initial") {
-      if (v === "0px" && (k.includes("margin") || k.includes("padding") || k.includes("border-width"))) return;
-      if (v === "0px" && (k === "top" || k === "left" || k === "right" || k === "bottom")) { /* keep */ } else if (v === "0px") return;
-      if (v === "none" && k !== "display" && k !== "max-width" && k !== "max-height") return;
-      if (v === "auto" && k !== "overflow") return;
+    // 2. 默认值过滤 (扩充)
+    // 这里我们做得保守一点，只过滤绝对安全的默认值
+    if (v === "auto" || v === "none" || v === "normal" || v === "0px" || v === "rgba(0, 0, 0, 0)" || v === "transparent" || v === "initial" || v === "static" || v === "0" || v === "0%" || v === "repeat" || v === "scroll" || v === "start" || v === "middle") {
+      if (v === "0px" && (k.includes("border-width") || k.includes("outline-width") || k.includes("margin") || k.includes("padding") || k.includes("left") || k.includes("right") || k.includes("top") || k.includes("bottom"))) return; 
+      if (v === "none" && !["display", "max-width", "max-height", "text-decoration"].includes(k)) return;
+      if (v === "auto" && !["width", "height", "overflow", "z-index", "cursor"].includes(k)) return; // cursor: auto 有时需要
+      if (v === "static" && k === "position") return;
+      if (v === "normal" && !["line-height", "font-weight"].includes(k)) return; 
+      if (v === "rgba(0, 0, 0, 0)" && (k === "background-color" || k === "color")) return;
+      if (v === "repeat" && k.includes("background-repeat")) return;
+      if (v === "scroll" && k.includes("background-attachment")) return;
+      if (v === "start" && (k === "text-align" || k === "justify-content" || k === "align-items")) return; // flex 默认可能是 row/start，视情况而定，但通常 start 是默认
     }
 
+
+    // 3. 继承值过滤 (必须保留，这是压缩的大头)
     if (parentObj && parentObj[k] === v) return;
 
     styleObj[k] = v;

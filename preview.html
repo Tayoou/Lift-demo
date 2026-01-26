@@ -242,6 +242,9 @@
         if (code.trim().startsWith("<")) code = `const Component = () => (\n${code}\n);`;
 
         const codeToRun = `
+          const { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect, useReducer, useContext, createContext } = React;
+          const { Check, X, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Menu, Search, User, ShoppingCart, Bell, Settings, ArrowRight, ArrowLeft, Plus, Minus, Trash, Edit, Save, Upload, Download, ExternalLink, Link, Copy, Share, Info, AlertCircle, AlertTriangle, CheckCircle, HelpCircle, Loader, RefreshCw, XCircle } = window.LucideIcons || {};
+          
           ${code}
           let Target = null;
           try { if (typeof Component !== 'undefined') Target = Component; } catch(e){}
