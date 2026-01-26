@@ -154,8 +154,32 @@ class GeminiInspector {
           <div id="hud">
               <div class="hud-header">
                   <div class="brand">
-                      <span style="width:8px; height:8px; background:#10b981; border-radius:50%; box-shadow:0 0 8px #10b981;"></span>
-                      Gemini UI
+                      <svg width="56" height="20" viewBox="0 0 180 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          <g clip-path="url(#clip0_7_62-ct)">
+                              <mask id="mask0_7_62-ct" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="180" height="64">
+                                  <path d="M180 0H0V64H180V0Z" fill="white"/>
+                              </mask>
+                              <g mask="url(#mask0_7_62-ct)">
+                                  <mask id="mask1_7_62-ct" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="65" height="64">
+                                      <path d="M64.4882 0H0V64H64.4882V0Z" fill="white"/>
+                                  </mask>
+                                  <g mask="url(#mask1_7_62-ct)">
+                                      <path d="M10.6355 46.4187L17.7072 53.4368L53.8583 17.5591V64H29.0551C13.0084 64 8.2192e-07 51.0899 0 35.1649V10.5495H46.7781L10.6355 46.4187ZM53.8583 17.5467L46.8078 10.5495H53.8583V17.5467Z" fill="white" fill-opacity="0.98"/>
+                                      <path d="M35.4331 0C51.4796 0 64.4882 12.91 64.4882 28.8352V53.4505H10.6299V0H35.4331ZM10.6354 46.4186L17.7071 53.4368L53.8646 17.5529L46.7929 10.5347L10.6354 46.4186Z" fill="white" fill-opacity="0.98"/>
+                                  </g>
+                                  <path d="M179.996 48.6526V59.0544H173.707C169.225 59.0544 165.732 57.9783 163.226 55.8262C160.72 53.6263 159.467 50.0634 159.467 45.1375V29.2121H154.134V19.0256H159.467V9.26944H171.828V19.0256H179.923V29.2121H171.828V45.281C171.828 46.4766 172.117 47.3374 172.695 47.8635C173.273 48.3896 174.237 48.6526 175.586 48.6526H179.996Z" fill="white"/>
+                                  <path d="M154.134 29.2121H145.057V59.0544H132.696V29.2121H128.215V19.0256H132.696V17.8778C132.696 12.9519 134.118 9.22161 136.961 6.68693C139.804 4.10443 143.973 2.81317 149.466 2.81317C150.382 2.81317 151.056 2.83708 151.49 2.8849V13.2867C149.129 13.1432 147.466 13.478 146.503 14.291C145.539 15.104 145.057 16.5626 145.057 18.6669V19.0256H154.134V29.2121Z" fill="white"/>
+                                  <path d="M121.536 22.483V59.0544H110.197V22.483H121.536Z" fill="white"/>
+                                  <path d="M108.941 12.3511L115.933 4.90057L122.924 12.3511L115.933 19.8017L108.941 12.3511Z" fill="white"/>
+                                  <path d="M88.7711 49.5852H104.963V59.0544H76.4106V8.69556H88.7711V49.5852Z" fill="white"/>
+                              </g>
+                          </g>
+                          <defs>
+                              <clipPath id="clip0_7_62-ct">
+                                  <rect width="180" height="64" fill="white"/>
+                              </clipPath>
+                          </defs>
+                      </svg>
                   </div>
                   <div class="status-badge" id="hud-status">LOCKED</div>
               </div>

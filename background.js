@@ -214,6 +214,7 @@ async function togglePageTransitions(tabId, disable) {
 
 async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   const tabId = sender.tab.id;
+  const tabUrl = sender.tab.url;
   const match = msg.selector.match(/data-divmagic-id="([^"]+)"/);
   const targetSelectorId = match ? match[1] : null;
 
@@ -256,7 +257,7 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
     mergeHoverDiff(baseTree, hoverTree);
 
     console.log("📝 Serializing...");
-    const htmlOutput = serializeTreeToHTML(baseTree);
+    const htmlOutput = serializeTreeToHTML(baseTree, tabUrl);
 
     // Loading & Layout
     let rootLayout = { width: "auto", height: "auto" };
@@ -488,13 +489,51 @@ async function fetchStylesForNode(tabId, nodeId, parentComputedStyle, isRoot = f
   return result;
 }
 
-function serializeTreeToHTML(node) {
+/**
+ * 将相对路径转换为绝对路径
+ * @param {string} path - 原始路径 (e.g. /img/logo.png)
+ * @param {string} baseUrl - 当前页面的 URL (e.g. https://wise.com/page)
+ */
+function makeUrlAbsolute(path, baseUrl) {
+  if (!path) return path;
+  if (path.startsWith("data:") || path.startsWith("blob:") || path.startsWith("http")) return path;
+
+  // 处理 //cdn.com 这种自适应协议
+  if (path.startsWith("//")) return `https:${path}`;
+
+  try {
+    return new URL(path, baseUrl).href;
+  } catch (e) {
+    return path;
+  }
+}
+
+function serializeTreeToHTML(node, baseUrl) {
   if (!node) return "";
   if (node.type === "text") return node.content;
-  if (node.type === "svg_raw") return node.html;
+
+  // 1. 修改：处理 SVG Raw 模式 (如果有内部相对链接)
+  if (node.type === "svg_raw") {
+    let html = node.html;
+    if (baseUrl) {
+      // 简单的正则替换 SVG 内部可能的相对链接 (比如 <image href="...">)
+      html = html.replace(/(href|src)="([^"]+)"/g, (match, attr, val) => {
+        return `${attr}="${makeUrlAbsolute(val, baseUrl)}"`;
+      });
+    }
+    return html;
+  }
 
   const tagName = node.tagName;
-  const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => `${k}:${v}`).join(";");
+
+  // 2. 修改：处理 Computed Style 里的背景图 URL
+  const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => {
+    if (baseUrl && v && v.includes('url(')) {
+      // 将 url('/bg.png') 替换为绝对路径
+      v = v.replace(/url\(['"]?(.+?)['"]?\)/g, (match, url) => `url('${makeUrlAbsolute(url, baseUrl)}')`);
+    }
+    return `${k}:${v}`;
+  }).join(";");
 
   let hoverDiffAttr = "";
   if (node.hoverDiff) {
@@ -521,12 +560,33 @@ function serializeTreeToHTML(node) {
   if (node.attributes) {
     Object.entries(node.attributes).forEach(([key, value]) => {
       if (key === "class" || key === "data-divmagic-id" || key === "style" || key.startsWith("on")) return;
-      otherAttrs += ` ${key}="${String(value).replace(/"/g, "&quot;")}"`;
+
+      let finalValue = value;
+
+      // 3. 核心修改：处理关键属性的路径转换
+      if (baseUrl) {
+        if (key === "src" || key === "href") {
+          finalValue = makeUrlAbsolute(value, baseUrl);
+        }
+        if (key === "srcset") {
+          // 处理 "img1.png 1x, img2.png 2x" 格式
+          finalValue = value.split(',').map(part => {
+            const [url, desc] = part.trim().split(' ');
+            return `${makeUrlAbsolute(url, baseUrl)} ${desc || ''}`.trim();
+          }).join(', ');
+        }
+      }
+
+      otherAttrs += ` ${key}="${String(finalValue).replace(/"/g, "&quot;")}"`;
     });
   }
 
   const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : "";
-  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${hoverDiffAttr}${rulesAttr}${varsAttr}${otherAttrs}>${node.children.map(serializeTreeToHTML).join('')}</${tagName}>`;
+
+  // 4. 核心修改：递归调用时，必须把 baseUrl 传给子节点
+  const childrenHtml = node.children.map(child => serializeTreeToHTML(child, baseUrl)).join('');
+
+  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${hoverDiffAttr}${rulesAttr}${varsAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
 }
 
 function processComputedStyle(cdpArray, parentObj = null, isRoot = false) {
