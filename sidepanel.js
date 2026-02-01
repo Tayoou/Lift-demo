@@ -133,19 +133,77 @@ async function renderLibrary() {
         card.innerHTML = `
             <div class="lib-thumb">${thumbContent}</div>
             <div class="lib-info">
+<<<<<<< HEAD
                 <div style="font-weight:600; font-size:11px; color:#334155; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${comp.name}</div>
                 <div style="font-size:9px; color:#94a3b8; display:flex; justify-content:space-between;">
                     <span>${new Date(comp.timestamp).toLocaleDateString()}</span>
                     <span class="lib-delete" style="cursor:pointer; color:#ef4444;">Delete</span>
+=======
+                <div class="lib-name-container" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;height:20px;">
+                    <div class="lib-name" style="font-weight:600; font-size:11px; color:#334155; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; margin-right:4px;" title="${comp.name}">${comp.name}</div>
+                    <input type="text" class="lib-name-input" style="display:none; width:100%; font-size:11px; padding:2px; border:1px solid #3b82f6; border-radius:2px; outline:none;" value="${comp.name}">
+                </div>
+                <div style="font-size:9px; color:#94a3b8; display:flex; justify-content:space-between; align-items:center;">
+                    <span>${new Date(comp.timestamp).toLocaleDateString()}</span>
+                    <div style="display:flex; gap:8px;">
+                        <span class="lib-rename" style="cursor:pointer; color:#64748b;" title="Rename">
+                            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                        </span>
+                        <span class="lib-delete" style="cursor:pointer; color:#ef4444;" title="Delete">
+                            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </span>
+                    </div>
+>>>>>>> e1d03a2496d321aa1730256bd0ab738d73787cf3
                 </div>
             </div>
         `;
 
         card.addEventListener("click", (e) => {
+<<<<<<< HEAD
             if (e.target.classList.contains("lib-delete")) return;
             loadComponent(comp);
         });
 
+=======
+            if (e.target.closest(".lib-delete") || e.target.closest(".lib-rename") || e.target.closest(".lib-name-input")) return;
+            loadComponent(comp);
+        });
+
+        const renameBtn = card.querySelector(".lib-rename");
+        const nameDisplay = card.querySelector(".lib-name");
+        const nameInput = card.querySelector(".lib-name-input");
+
+        renameBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            nameDisplay.style.display = "none";
+            nameInput.style.display = "block";
+            nameInput.focus();
+        });
+
+        const saveName = async () => {
+            const newName = nameInput.value.trim();
+            if (newName && newName !== comp.name) {
+                const data = await chrome.storage.local.get(['componentLibrary']);
+                const updatedLib = data.componentLibrary.map(c => {
+                    if (c.id === comp.id) return { ...c, name: newName };
+                    return c;
+                });
+                await chrome.storage.local.set({ componentLibrary: updatedLib });
+                renderLibrary();
+            } else {
+                 nameDisplay.style.display = "block";
+                 nameInput.style.display = "none";
+                 nameInput.value = comp.name;
+            }
+        };
+
+        nameInput.addEventListener("blur", saveName);
+        nameInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") saveName();
+        });
+        nameInput.addEventListener("click", (e) => e.stopPropagation());
+
+>>>>>>> e1d03a2496d321aa1730256bd0ab738d73787cf3
         card.querySelector(".lib-delete").addEventListener("click", async (e) => {
             e.stopPropagation();
             if (confirm("Delete this component?")) {

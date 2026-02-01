@@ -83,19 +83,23 @@ Task: Reconstruct the provided **Augmented HTML** into a responsive React compon
 Goal: 100% visual fidelity + 100% logical responsiveness.
 
 🚨 DATA SOURCE PROTOCOL (STRICT PRIORITY):
-1. **PRIORITY 1: \`data-rules\`**: Check CSS variables.
-2. **PRIORITY 2: \`style\` attribute**: This is the DEFAULT state.
-3. **PRIORITY 3: \`data-hover-diff\`**: Use for hover states.
+1. **PRIORITY 1: \`style\` attribute**: This is the DEFAULT state. (Contains computed styles)
+2. **PRIORITY 2: \`data-hover-diff\`**: Use for hover states.
 
 🎨 COLOR STRATEGY:
 - Base color: Read from \`style\`.
 - Hover color: Read from \`data-hover-diff\`.
 
 ✨ ANIMATION & LAYOUT:
-- **Retain Animations**: Look for transition/animation/transform properties.
+- **Retain Animations**: Look for transition/animation/transform properties in \`style\`.
 - **Freeze Time**: The input HTML reflects a "frozen" hover state. The values in \`data-hover-diff\` are the FINAL target values.
 - **DOM FIDELITY**: Trust the Input HTML hierarchy. If absolute layers (overlays/backgrounds) are siblings in the Input, keep them as **siblings** in React. Do NOT nest them inside other elements, otherwise transforms/opacity will stack incorrectly.
 - **PREVENT COLLAPSE**: If an \`absolute\` element uses \`padding-bottom\` (aspect ratio hack), YOU MUST give it explicit \`w-full\`.
+
+⚠️ CRITICAL SYNTAX RULES:
+1. **CLOSE ALL TAGS**: Ensure every opening tag (<div>, <section>, <footer>, etc.) has a matching closing tag.
+2. **NO TRUNCATION**: Do not truncate the code. Output the FULL component.
+3. **SVG HANDLING**: For complex SVGs, ensure strict XML validity.
 
 OUTPUT FORMAT:
 - Returns ONLY raw JSX code.
@@ -212,6 +216,44 @@ async function togglePageTransitions(tabId, disable) {
   } catch (e) { console.warn("Toggle transition failed", e); }
 }
 
+// ==========================================
+// 5. 调试工具：Base64 精确审计
+// ==========================================
+function debugTokenBloat(htmlString) {
+  const totalLen = htmlString.length;
+  console.group("⚖️ Base64 & Junk Forensics");
+  console.log(`📦 Total Payload: ${(totalLen / 1024).toFixed(2)} KB`);
+
+  // 1. 精确计算 Base64 占用
+  // 匹配 src="data:..." 或 url("data:...")
+  const base64Regex = /(?:src=|url\()['"]?(data:image\/[^;]+;base64,[^"'\)]+)['"]?\)?/g;
+  let match;
+  let totalBase64Size = 0;
+  let count = 0;
+
+  while ((match = base64Regex.exec(htmlString)) !== null) {
+    const content = match[1]; // 捕获 base64 内容
+    totalBase64Size += content.length;
+    count++;
+  }
+
+  console.log(`🖼️ Base64 Images Count: ${count}`);
+  console.log(`🔥 Base64 Total Size: ${(totalBase64Size / 1024).toFixed(2)} KB`);
+  console.log(`📉 Base64 Ratio: ${((totalBase64Size / totalLen) * 100).toFixed(2)}%`);
+
+  // 2. 检查默认样式污染 (这是真正的罪魁祸首)
+  const junkProps = ["animation-composition", "font-feature-settings", "font-variant-ligatures", "math-depth", "text-size-adjust"];
+  let junkCount = 0;
+  junkProps.forEach(prop => {
+    const regex = new RegExp(prop, "g");
+    const found = (htmlString.match(regex) || []).length;
+    if (found > 0) console.warn(`⚠️ Junk Property '${prop}' found ${found} times!`);
+    junkCount += found;
+  });
+
+  console.groupEnd();
+}
+
 async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   const tabId = sender.tab.id;
   const tabUrl = sender.tab.url;
@@ -258,6 +300,8 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
 
     console.log("📝 Serializing...");
     const htmlOutput = serializeTreeToHTML(baseTree, tabUrl);
+
+    debugTokenBloat(htmlOutput);
 
     // Loading & Layout
     let rootLayout = { width: "auto", height: "auto" };
@@ -489,48 +533,62 @@ async function fetchStylesForNode(tabId, nodeId, parentComputedStyle, isRoot = f
   return result;
 }
 
-/**
- * 将相对路径转换为绝对路径
- * @param {string} path - 原始路径 (e.g. /img/logo.png)
- * @param {string} baseUrl - 当前页面的 URL (e.g. https://wise.com/page)
- */
+// ==========================================
+// 4. 核心序列化 (🔥 V2.0: 包含 URL 补全 + Base64 抽脂)
+// ==========================================
+
 function makeUrlAbsolute(path, baseUrl) {
   if (!path) return path;
   if (path.startsWith("data:") || path.startsWith("blob:") || path.startsWith("http")) return path;
-
-  // 处理 //cdn.com 这种自适应协议
   if (path.startsWith("//")) return `https:${path}`;
+  try { return new URL(path, baseUrl).href; } catch (e) { return path; }
+}
 
-  try {
-    return new URL(path, baseUrl).href;
-  } catch (e) {
-    return path;
+/**
+ * ✂️ 新增辅助函数：Base64 截断器
+ * 如果字符串是 Base64 且超过 100 字符，直接截断，保留头部标记供 AI 识别
+ */
+function truncateBase64(value) {
+  if (!value || typeof value !== 'string') return value;
+
+  // 检查是否包含 data:image
+  if (value.includes("data:image")) {
+    // 如果长度超过 500 (通常 Base64 都几千几万)，才截断
+    if (value.length > 500) {
+      // 保留前 30 个字符让 AI 知道这是图片类型 (如 data:image/png;base64...)
+      return value.substring(0, 30) + "...[BASE64_IMAGE_DATA_TRUNCATED]...";
+    }
   }
+  return value;
 }
 
 function serializeTreeToHTML(node, baseUrl) {
   if (!node) return "";
   if (node.type === "text") return node.content;
 
-  // 1. 修改：处理 SVG Raw 模式 (如果有内部相对链接)
+  // 1. 处理 SVG Raw
   if (node.type === "svg_raw") {
     let html = node.html;
     if (baseUrl) {
-      // 简单的正则替换 SVG 内部可能的相对链接 (比如 <image href="...">)
-      html = html.replace(/(href|src)="([^"]+)"/g, (match, attr, val) => {
-        return `${attr}="${makeUrlAbsolute(val, baseUrl)}"`;
-      });
+      html = html.replace(/(href|src)="([^"]+)"/g, (match, attr, val) => `${attr}="${makeUrlAbsolute(val, baseUrl)}"`);
     }
     return html;
   }
 
   const tagName = node.tagName;
 
-  // 2. 修改：处理 Computed Style 里的背景图 URL
+  // 2. 处理 Computed Style (修复背景图里的 Base64)
   const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => {
-    if (baseUrl && v && v.includes('url(')) {
-      // 将 url('/bg.png') 替换为绝对路径
+    // A. 修复相对路径 URL
+    if (baseUrl && v && v.includes('url(') && !v.includes('data:')) {
       v = v.replace(/url\(['"]?(.+?)['"]?\)/g, (match, url) => `url('${makeUrlAbsolute(url, baseUrl)}')`);
+    }
+    // B. 🔥 核心：截断背景图里的 Base64
+    if (v && v.includes('data:image')) {
+      // 正则匹配 url('data:...') 并截断内容
+      v = v.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, (match, dataContent) => {
+        return `url('${truncateBase64(dataContent)}')`;
+      });
     }
     return `${k}:${v}`;
   }).join(";");
@@ -541,77 +599,130 @@ function serializeTreeToHTML(node, baseUrl) {
     hoverDiffAttr = ` data-hover-diff="${diffString}"`;
   }
 
-  let rulesAttr = "", varsAttr = "";
+  // 🔥 优化：彻底移除 data-rules 和 data-vars，AI 只依赖 Computed Style 还原视觉
+  let rulesAttr = "";
+  /*
   if (node.matchedRules) {
-    let ownCss = "", inheritedVars = "";
+    let ownCss = "";
     node.matchedRules.forEach(r => {
-      if (r.type === "Inherited") {
-        const vars = r.cssText.split(";").filter(s => s.trim().startsWith("--")).join(";");
-        if (vars) inheritedVars += vars + "; ";
-      } else {
-        ownCss += `${r.selector} { ${r.cssText} } `;
+      if (r.type !== "Inherited") {
+        let safeCss = r.cssText;
+        if (safeCss.includes('data:image')) {
+          safeCss = safeCss.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
+        }
+        ownCss += `${r.selector} { ${safeCss} } `;
       }
     });
     if (ownCss) rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
-    if (inheritedVars) varsAttr = ` data-vars="${inheritedVars.replace(/"/g, "'").trim()}"`;
   }
+  */
 
   let otherAttrs = "";
   if (node.attributes) {
     Object.entries(node.attributes).forEach(([key, value]) => {
+      // 移除 class 和其他冗余属性
       if (key === "class" || key === "data-divmagic-id" || key === "style" || key.startsWith("on")) return;
 
       let finalValue = value;
 
-      // 3. 核心修改：处理关键属性的路径转换
-      if (baseUrl) {
-        if (key === "src" || key === "href") {
-          finalValue = makeUrlAbsolute(value, baseUrl);
-        }
-        if (key === "srcset") {
-          // 处理 "img1.png 1x, img2.png 2x" 格式
-          finalValue = value.split(',').map(part => {
-            const [url, desc] = part.trim().split(' ');
-            return `${makeUrlAbsolute(url, baseUrl)} ${desc || ''}`.trim();
-          }).join(', ');
-        }
+      // 3. 处理属性
+      if (baseUrl && (key === "src" || key === "href")) {
+        finalValue = makeUrlAbsolute(value, baseUrl);
+      }
+      if (baseUrl && key === "srcset") {
+        finalValue = value.split(',').map(part => {
+          const [url, desc] = part.trim().split(' ');
+          return `${makeUrlAbsolute(url, baseUrl)} ${desc || ''}`.trim();
+        }).join(', ');
+      }
+
+      // 🔥 核心：截断 src 或 srcset 里的 Base64
+      finalValue = truncateBase64(finalValue);
+
+      // 处理行内 style 属性里的 Base64
+      if (key === "style" && String(finalValue).includes('data:image')) {
+        finalValue = String(finalValue).replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
       }
 
       otherAttrs += ` ${key}="${String(finalValue).replace(/"/g, "&quot;")}"`;
     });
   }
 
-  const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : "";
-
-  // 4. 核心修改：递归调用时，必须把 baseUrl 传给子节点
+  // const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : ""; // 移除 class
   const childrenHtml = node.children.map(child => serializeTreeToHTML(child, baseUrl)).join('');
 
-  return `<${tagName} ${classAttr} style="${computedString}" data-computed-style="${computedString}"${hoverDiffAttr}${rulesAttr}${varsAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
+  // 这里的 style 属性已经是清洗过的 computedString，非常干净
+  return `<${tagName} style="${computedString}"${hoverDiffAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
 }
 
 function processComputedStyle(cdpArray, parentObj = null, isRoot = false) {
   const styleObj = {};
 
-  const blocklist = new Set([
-    "text-rendering", "zoom", "mix-blend-mode"
+  // 🛑 精准黑名单：只屏蔽日志里出现的那些毫无意义的浏览器默认值
+  const blockList = new Set([
+    // 1. 逻辑属性 (Logical Properties) - Tailwind 主要使用物理属性，这些是冗余的
+    "block-size", "min-block-size", "max-block-size",
+    "inline-size", "min-inline-size", "max-inline-size",
+    "border-block-end-color", "border-block-end-style", "border-block-end-width",
+    "border-block-start-color", "border-block-start-style", "border-block-start-width",
+    "border-inline-end-color", "border-inline-end-style", "border-inline-end-width",
+    "border-inline-start-color", "border-inline-start-style", "border-inline-start-width",
+    "border-block-color", "border-block-style", "border-block-width",
+    "border-inline-color", "border-inline-style", "border-inline-width",
+    "margin-block-end", "margin-block-start", "margin-inline-end", "margin-inline-start",
+    "padding-block-end", "padding-block-start", "padding-inline-end", "padding-inline-start",
+    "inset-block-end", "inset-block-start", "inset-inline-end", "inset-inline-start",
+    "overflow-block", "overflow-inline", "overscroll-behavior-block", "overscroll-behavior-inline",
+
+    // 2. 渲染引擎内部默认值 / 极少使用的属性
+    "animation-composition", "animation-play-state", "animation-range-end", "animation-range-start", "animation-timeline",
+    "background-blend-mode", "background-origin", "buffered-rendering", "break-after", "break-before", "break-inside",
+    "color-interpolation", "color-interpolation-filters", "color-rendering", "clip-rule", "caret-color", "column-fill", "column-rule-color", "column-rule-width",
+    "font-feature-settings", "font-language-override", "font-optical-sizing", "font-palette", "font-kerning", "font-variation-settings",
+    "font-synthesis", "font-variant", "font-variant-alternates", "font-variant-caps", "font-variant-east-asian",
+    "font-variant-emoji", "font-variant-ligatures", "font-variant-numeric", "font-variant-position",
+    "forced-color-adjust", "grid-auto-columns", "grid-auto-rows", "hyphens", "hyphenate-limit-chars",
+    "image-orientation", "image-rendering", "isolation", "interpolate-size",
+    "line-break", "math-depth", "math-style", "mask-type", "mix-blend-mode", "marker", "mask-clip", "mask-composite", "mask-mode", "mask-origin", "mask-repeat",
+    "object-position", "offset-distance", "offset-rotate", "offset-path",
+    "overflow-anchor", "overflow-clip-margin", "overlay", "paint-order", "perspective", "perspective-origin",
+    "r", "rx", "ry", "ruby-position", "ruby-align", // SVG 半径等默认值
+    "scroll-behavior", "scroll-margin", "scroll-margin-block", "scroll-margin-inline", "scroll-margin-bottom", "scroll-margin-top", "scroll-margin-left", "scroll-margin-right",
+    "scroll-padding", "scroll-padding-block", "scroll-padding-inline", "scroll-padding-bottom", "scroll-padding-top", "scroll-padding-left", "scroll-padding-right",
+    "scroll-snap-align", "scroll-snap-stop", "scroll-snap-type", "scroll-timeline-axis",
+    "shape-image-threshold", "shape-margin", "shape-outside", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stop-color", "stop-opacity",
+    "text-decoration-skip-ink", "text-decoration-style", "text-decoration-color", "text-emphasis-color", "text-emphasis-position", "text-orientation", "text-rendering", "text-size-adjust", "text-spacing-trim", "touch-action", "text-anchor", "text-wrap-mode",
+    "vector-effect", "writing-mode", "widows", "will-change", "white-space-collapse",
+    "zoom",
+
+    // 3. Webkit 前缀垃圾
+    "-webkit-font-smoothing", "-webkit-locale", "-webkit-text-orientation", "-webkit-writing-mode", "-webkit-ruby-position", "-webkit-text-fill-color", "-webkit-tap-highlight-color", "-webkit-print-color-adjust", "-webkit-text-stroke", "-webkit-text-stroke-color", "-webkit-text-stroke-width", "-webkit-text-security", "-webkit-user-drag", "-webkit-user-modify"
   ]);
 
   cdpArray.forEach(p => {
     const k = p.name;
     const v = p.value;
 
-    if (blocklist.has(k)) return;
+    // 1. 黑名单拦截
+    if (blockList.has(k)) return;
+    if (k.startsWith("-webkit-") && !k.includes("line-clamp")) return; // 只保留 line-clamp
 
-    if (k.startsWith("-webkit-") && !k.includes("line-clamp") && !k.includes("box-orient") && !k.includes("text-fill-color")) return;
-    if (k.startsWith("-moz-") || k.startsWith("-ms-")) return;
-
-    if (v === "auto" || v === "none" || v === "normal" || v === "0px" || v === "rgba(0, 0, 0, 0)" || v === "transparent" || v === "initial") {
-      if (v === "0px" && (k.includes("margin") || k.includes("padding") || k.includes("border-width"))) return;
-      if (v === "0px" && (k === "top" || k === "left" || k === "right" || k === "bottom")) { /* keep */ } else if (v === "0px") return;
-      if (v === "none" && k !== "display" && k !== "max-width" && k !== "max-height") return;
-      if (v === "auto" && k !== "overflow") return;
+    // 2. 默认值过滤 (扩充)
+    // 这里我们做得保守一点，只过滤绝对安全的默认值
+    if (v === "auto" || v === "none" || v === "normal" || v === "0px" || v === "rgba(0, 0, 0, 0)" || v === "transparent" || v === "initial" || v === "static" || v === "0" || v === "0%" || v === "repeat" || v === "scroll" || v === "start" || v === "middle") {
+      if (v === "0px" && (k.includes("border-width") || k.includes("outline-width") || k.includes("margin") || k.includes("padding") || k.includes("left") || k.includes("right") || k.includes("top") || k.includes("bottom"))) return;
+      if (v === "none" && !["display", "max-width", "max-height", "text-decoration"].includes(k)) return;
+      if (v === "auto" && !["width", "height", "overflow", "z-index", "cursor"].includes(k)) return; // cursor: auto 有时需要
+      if (v === "static" && k === "position") return;
+      if (v === "normal" && !["line-height", "font-weight"].includes(k)) return;
+      if (v === "rgba(0, 0, 0, 0)" && (k === "background-color" || k === "color")) return;
+      if (v === "repeat" && k.includes("background-repeat")) return;
+      if (v === "scroll" && k.includes("background-attachment")) return;
+      if (v === "start" && (k === "text-align" || k === "justify-content" || k === "align-items")) return; // flex 默认可能是 row/start，视情况而定，但通常 start 是默认
     }
 
+
+    // 3. 继承值过滤 (必须保留，这是压缩的大头)
     if (parentObj && parentObj[k] === v) return;
 
     styleObj[k] = v;
