@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "DivMagic 2.0 (Demo)",
+  "name": "Lift",
   "version": "1.0",
   "permissions": [
     "tabs",
@@ -8,7 +8,8 @@
     "debugger",
     "scripting",
     "sidePanel",
-    "storage"
+    "storage",
+    "unlimitedStorage"
   ],
   "host_permissions": ["https://generativelanguage.googleapis.com/*"],
   "background": {
@@ -16,7 +17,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Start DivMagic"
+    "default_title": "Activate Inspector"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
@@ -25,7 +26,7 @@
     "pages": ["preview.html"]
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'",
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
     "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com;"
   },
   "content_scripts": [

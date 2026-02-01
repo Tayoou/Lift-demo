@@ -4,14 +4,13 @@ import { GEMINI_API_KEY } from "./config.js";
 const debuggingTabs = new Set();
 
 // ==========================================
-// 1. 基础事件监听
+// 1. 事件监听
 // ==========================================
-chrome.action.onClicked.addListener(async (tab) => {
-  try {
-    await chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_PICKER" });
-  } catch (e) {
-    console.warn("Content script not ready.", e);
-  }
+
+chrome.action.onClicked.addListener((tab) => {
+  chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] }, () => {
+    chrome.tabs.sendMessage(tab.id, { type: "ACTIVATE_HUD" }).catch(e => console.log("Init HUD msg", e));
+  });
 });
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -26,73 +25,84 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "DEMO_ELEMENT_SELECTED") {
-    if (sender.tab?.id) {
-      chrome.sidePanel
-        .open({ tabId: sender.tab.id, windowId: sender.tab.windowId })
-        .catch(console.error);
-    }
+  if (msg.type === "OPEN_SIDEPANEL") {
+    if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id, windowId: sender.tab.windowId }).catch(console.error);
+    return;
   }
+
   if (msg.type === "CAPTURE_VISIBLE_TAB") {
     chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
-      sendResponse({
-        success: !chrome.runtime.lastError,
-        dataUrl,
-        error: chrome.runtime.lastError?.message,
-      });
+      sendResponse({ success: !chrome.runtime.lastError, dataUrl, error: chrome.runtime.lastError?.message });
     });
     return true;
   }
+
   if (msg.type === "CDP_GET_STYLE") {
     handleCdpGetTreeStyles(msg, sender, sendResponse);
+    return true;
+  }
+
+  if (msg.type === "AI_REFINE_CODE") {
+    handleGeminiRefinement(msg.code, msg.instruction).then(newCode => {
+      sendResponse({ success: true, data: newCode });
+    }).catch(err => {
+      sendResponse({ success: false, error: err.message });
+    });
     return true;
   }
 });
 
 // ==========================================
-// 2. AI 处理核心 (配合 V22 的逻辑 Prompt)
+// 2. AI 处理核心
 // ==========================================
+
+async function getActiveApiKey() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['user_gemini_key'], (result) => {
+      if (result.user_gemini_key && result.user_gemini_key.length > 10) {
+        resolve(result.user_gemini_key);
+      } else {
+        resolve(GEMINI_API_KEY);
+      }
+    });
+  });
+}
+
 async function handleGeminiTestStream(msg, port) {
   const stylesData = msg.styles;
+  const apiKey = await getActiveApiKey();
 
-  if (GEMINI_API_KEY === "YOUR_API_KEY_HERE") {
+  if (!apiKey || apiKey === "YOUR_API_KEY_HERE") {
     port.postMessage({ success: false, error: "请配置 API Key" });
     return;
   }
 
-  const prompt = `Role: Pixel-Perfect HTML-to-Tailwind Converter.
+  const prompt = `Role: Senior Frontend Engineer (Tailwind CSS Specialist).
 
-Task: Convert the provided **Augmented HTML** into a React component.
-Goal: 100% visual fidelity.
+Task: Reconstruct the provided **Augmented HTML** into a responsive React component.
+Goal: 100% visual fidelity + 100% logical responsiveness.
 
-🚨 DATA CONTEXT:
-The input was captured in a **FORCED HOVER STATE**.
-- **Inline \`style\`**: Represents the element's FINAL state (including hover effects).
-- **\`data-matched-rules\`**: Contains the transition logic.
+🚨 DATA SOURCE PROTOCOL (STRICT PRIORITY):
+1. **PRIORITY 1: \`style\` attribute**: This is the DEFAULT state. (Contains computed styles)
+2. **PRIORITY 2: \`data-hover-diff\`**: Use for hover states.
 
-STRATEGY:
+🎨 COLOR STRATEGY:
+- Base color: Read from \`style\`.
+- Hover color: Read from \`data-hover-diff\`.
 
-1. **Z-INDEX (STRICT)**:
-   - **DO NOT INVENT Z-INDEX values.** - Check the inline \`style\` or \`data-computed-style\`.
-   - If \`z-index\` is \`auto\` or undefined -> **DO NOT** add a \`z-*\` class. Leave it as default.
-   - If \`z-index\` is a number (e.g., \`3\`) -> Use \`z-[3]\` or \`z-30\` (Tailwind convention).
-   - **Reason**: Adding arbitrary z-indexes breaks the natural DOM stacking order.
+✨ ANIMATION & LAYOUT:
+- **Retain Animations**: Look for transition/animation/transform properties in \`style\`.
+- **Freeze Time**: The input HTML reflects a "frozen" hover state. The values in \`data-hover-diff\` are the FINAL target values.
+- **DOM FIDELITY**: Trust the Input HTML hierarchy. If absolute layers (overlays/backgrounds) are siblings in the Input, keep them as **siblings** in React. Do NOT nest them inside other elements, otherwise transforms/opacity will stack incorrectly.
+- **PREVENT COLLAPSE**: If an \`absolute\` element uses \`padding-bottom\` (aspect ratio hack), YOU MUST give it explicit \`w-full\`.
 
-2. **LAYOUT & POSITION**:
-   - Trust inline \`style\` implicitly. 
-   - If \`style\` says \`width: 472px\`, use \`w-[472px]\`. Do not guess \`w-full\`.
-
-3. **INTERACTION (Reverse Engineering)**:
-   - Since input style shows the *Hover* state (e.g., \`transform: translateY(-32px)\`), you must check \`data-matched-rules\` to confirm this is a hover effect.
-   - If confirmed, assume the *initial* state is \`transform-none\` (or whatever the base rule says).
-   - Code pattern: \`transform-none hover:-translate-y-[32px]\`.
-
-4. **SVG**:
-   - Copy EXACTLY. Do NOT add \`stroke-width\` or \`stroke\` unless explicitly in the computed style.
-   - If Input SVG path has attributes like \`stroke-width="1"\`, keep it. Don't change it to 2.
+⚠️ CRITICAL SYNTAX RULES:
+1. **CLOSE ALL TAGS**: Ensure every opening tag (<div>, <section>, <footer>, etc.) has a matching closing tag.
+2. **NO TRUNCATION**: Do not truncate the code. Output the FULL component.
+3. **SVG HANDLING**: For complex SVGs, ensure strict XML validity.
 
 OUTPUT FORMAT:
-- Returns raw JSX code.
+- Returns ONLY raw JSX code.
 - Define component as \`const Component = () => { ... }\`.
 - No markdown.
 
@@ -100,7 +110,7 @@ INPUT HTML:
 ${stylesData}`;
 
   try {
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: "gemini-2.5-pro",
       generationConfig: { temperature: 0.1 },
@@ -113,17 +123,10 @@ ${stylesData}`;
     for await (const chunk of result.stream) {
       const chunkText = chunk.text();
       fullText += chunkText;
-      port.postMessage({
-        type: "STREAM_CHUNK",
-        chunk: chunkText,
-        text: chunkText,
-      });
+      port.postMessage({ type: "STREAM_CHUNK", chunk: chunkText, text: chunkText });
     }
 
-    const cleanAiText = fullText
-      .replace(/^```(jsx|html|javascript)?\n/, "")
-      .replace(/^```/, "")
-      .replace(/```$/, "");
+    const cleanAiText = fullText.replace(/^```(jsx|html|javascript)?\n/, "").replace(/```$/, "");
     port.postMessage({ type: "STREAM_DONE" });
     port.postMessage({ success: true, data: cleanAiText });
   } catch (error) {
@@ -132,100 +135,198 @@ ${stylesData}`;
   }
 }
 
-// ==========================================
-// 辅助函数：递归收集子树中所有节点的 ID
-// ==========================================
-function collectAllNodeIds(node, ids = []) {
-  if (node.nodeId) {
-    ids.push(node.nodeId);
+async function handleGeminiRefinement(currentCode, instruction) {
+  const apiKey = await getActiveApiKey();
+  if (!apiKey) throw new Error("API Key missing");
+
+  const prompt = `
+    Role: Senior React Refactoring Expert.
+    Task: Modify the provided React component based on the USER INSTRUCTION.
+
+    CONTEXT - Current Code:
+    \`\`\`jsx
+    ${currentCode}
+    \`\`\`
+
+    USER INSTRUCTION:
+    "${instruction}"
+
+    RULES:
+    1. STRICTLY output ONLY the updated raw JSX code. 
+    2. NO markdown formatting.
+    3. Use Tailwind CSS for styling changes.
+  `;
+
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text();
+
+    text = text.replace(/^```(jsx|javascript|js)?/, "").replace(/```$/, "").trim();
+    return text;
+  } catch (error) {
+    console.error("Refine Error:", error);
+    throw error;
   }
-  if (node.children) {
-    node.children.forEach((child) => collectAllNodeIds(child, ids));
-  }
-  return ids;
 }
 
 // ==========================================
-// 3. CDP 核心逻辑 (V25.0 全员 Hover)
+// 3. CDP 核心逻辑 (🔥 核弹级冻结 + 完整采集)
 // ==========================================
+
+function collectAllNodeIds(node, ids = []) {
+  if (node.nodeId) ids.push(node.nodeId);
+  if (node.children) node.children.forEach((child) => collectAllNodeIds(child, ids));
+  return ids;
+}
+
+// 🔥 V60.22: 核弹级动画冻结 (Universal Freeze)
+async function togglePageTransitions(tabId, disable) {
+  // 🔥 核心修改：增加了 *::before, *::after 选择器，并强制重置所有动画属性
+  const css = `
+    *, *::before, *::after {
+      transition-property: none !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      animation: none !important;
+      animation-duration: 0s !important;
+      animation-delay: 0s !important;
+    }
+  `;
+
+  const expression = disable
+    ? `(function(){
+            const style = document.createElement('style');
+            style.id = 'divmagic-disable-transitions';
+            style.innerHTML = \`${css}\`;
+            document.head.appendChild(style);
+            // 强制重绘 (Force Reflow) 以确保样式立即生效
+            void document.body.offsetHeight; 
+           })()`
+    : `(function(){
+            const style = document.getElementById('divmagic-disable-transitions');
+            if(style) style.remove();
+           })()`;
+
+  try {
+    await sendDebuggerCommand(tabId, "Runtime.evaluate", { expression });
+  } catch (e) { console.warn("Toggle transition failed", e); }
+}
+
+// ==========================================
+// 5. 调试工具：Base64 精确审计
+// ==========================================
+function debugTokenBloat(htmlString) {
+  const totalLen = htmlString.length;
+  console.group("⚖️ Base64 & Junk Forensics");
+  console.log(`📦 Total Payload: ${(totalLen / 1024).toFixed(2)} KB`);
+
+  // 1. 精确计算 Base64 占用
+  // 匹配 src="data:..." 或 url("data:...")
+  const base64Regex = /(?:src=|url\()['"]?(data:image\/[^;]+;base64,[^"'\)]+)['"]?\)?/g;
+  let match;
+  let totalBase64Size = 0;
+  let count = 0;
+
+  while ((match = base64Regex.exec(htmlString)) !== null) {
+    const content = match[1]; // 捕获 base64 内容
+    totalBase64Size += content.length;
+    count++;
+  }
+
+  console.log(`🖼️ Base64 Images Count: ${count}`);
+  console.log(`🔥 Base64 Total Size: ${(totalBase64Size / 1024).toFixed(2)} KB`);
+  console.log(`📉 Base64 Ratio: ${((totalBase64Size / totalLen) * 100).toFixed(2)}%`);
+
+  // 2. 检查默认样式污染 (这是真正的罪魁祸首)
+  const junkProps = ["animation-composition", "font-feature-settings", "font-variant-ligatures", "math-depth", "text-size-adjust"];
+  let junkCount = 0;
+  junkProps.forEach(prop => {
+    const regex = new RegExp(prop, "g");
+    const found = (htmlString.match(regex) || []).length;
+    if (found > 0) console.warn(`⚠️ Junk Property '${prop}' found ${found} times!`);
+    junkCount += found;
+  });
+
+  console.groupEnd();
+}
+
 async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   const tabId = sender.tab.id;
-  // 提取 Selector ID
+  const tabUrl = sender.tab.url;
   const match = msg.selector.match(/data-divmagic-id="([^"]+)"/);
   const targetSelectorId = match ? match[1] : null;
 
-  console.log(`⚖️ [Engine] Starting Capture for: ${targetSelectorId}`);
+  console.log(`⚖️ [Engine] Capture: ${targetSelectorId}`);
 
   try {
-    // 1. 连接
-    try {
-      await chrome.debugger.attach({ tabId }, "1.3");
-      debuggingTabs.add(tabId);
-    } catch (e) {
-      if (!e.message.includes("already attached")) {
-        try {
-          await chrome.debugger.detach({ tabId });
-        } catch (_) {}
-        await chrome.debugger.attach({ tabId }, "1.3");
-      }
-    }
+    try { await chrome.debugger.attach({ tabId }, "1.3"); debuggingTabs.add(tabId); }
+    catch (e) { if (!e.message.includes("already attached")) { try { await chrome.debugger.detach({ tabId }); } catch (_) { } await chrome.debugger.attach({ tabId }, "1.3"); } }
 
     await sendDebuggerCommand(tabId, "DOM.enable");
     await sendDebuggerCommand(tabId, "CSS.enable");
 
-    // 2. 定位根节点
-    const doc = await sendDebuggerCommand(tabId, "DOM.getDocument", {
-      depth: -1,
-    }); // depth: -1 拿全量树
-    const rootNode = findNodeByAttributeValue(
-      doc.root,
-      "data-divmagic-id",
-      targetSelectorId
-    );
+    const doc = await sendDebuggerCommand(tabId, "DOM.getDocument", { depth: -1 });
+    const rootNode = findNodeByAttributeValue(doc.root, "data-divmagic-id", targetSelectorId);
 
     if (!rootNode) throw new Error("Target node not found.");
-    console.log(`✅ Root Node Found ID: ${rootNode.nodeId}`);
 
-    // 🔥 3. 圣诞树模式：强制所有节点 Hover 🔥
-    // 这解决了“子元素独立 Hover 动画”丢失的问题
     const allNodeIds = collectAllNodeIds(rootNode);
-    console.log(`⚡️ Forcing Hover on ${allNodeIds.length} nodes...`);
 
-    // 并行发送指令，为了性能和稳定性，我们可以分批或者直接 Promise.all
-    // 这里的 catch 是为了防止某个节点（比如 shadowRoot 里的）报错导致全盘崩溃
-    await Promise.all(
-      allNodeIds.map((id) =>
-        sendDebuggerCommand(tabId, "CSS.forcePseudoState", {
-          nodeId: id,
-          forcedPseudoClasses: ["hover"],
-        }).catch((e) => {})
-      )
-    );
+    // 1. Base State
+    console.log("📸 Capturing Base State...");
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: [] }).catch(() => { })));
+    const baseTree = await captureTreeState(tabId, rootNode, null, true, false);
 
-    // 给浏览器一点喘息时间重算样式 (Layout Thrashing)
-    await new Promise((r) => setTimeout(r, 100));
+    // 🔥 2. Hover State (使用增强版冻结逻辑)
+    console.log("📸 Capturing Hover State (Freezing)...");
+    await togglePageTransitions(tabId, true); // 🚫 核弹级禁用
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: ["hover"] }).catch(() => { })));
 
-    // 4. 采集 (Inherited + Computed + Clean SVG + Full Rules)
-    console.log("📸 Capturing Tree State (All-Hovered)...");
-    const finalTree = await captureTreeState(tabId, rootNode);
+    // 给浏览器一点时间应用样式和计算布局 (50ms 足够)
+    await new Promise(r => setTimeout(r, 50));
 
-    // 5. 还原状态 (打扫现场)
-    // 同样需要递归还原，否则页面会乱套
-    await Promise.all(
-      allNodeIds.map((id) =>
-        sendDebuggerCommand(tabId, "CSS.forcePseudoState", {
-          nodeId: id,
-          forcedPseudoClasses: [],
-        }).catch((e) => {})
-      )
-    );
+    const hoverTree = await captureTreeState(tabId, rootNode, null, true, true);
 
-    // 6. 序列化
+    // 3. Reset
+    await togglePageTransitions(tabId, false); // ✅ 恢复现场
+    await Promise.all(allNodeIds.map((id) => sendDebuggerCommand(tabId, "CSS.forcePseudoState", { nodeId: id, forcedPseudoClasses: [] }).catch(() => { })));
+
+    // 4. Merge
+    mergeHoverDiff(baseTree, hoverTree);
+
     console.log("📝 Serializing...");
-    const htmlOutput = serializeTreeToHTML(finalTree);
+    const htmlOutput = serializeTreeToHTML(baseTree, tabUrl);
 
-    console.log(`✅ Complete.`);
-    sendResponse({ success: true, data: htmlOutput });
+    debugTokenBloat(htmlOutput);
+
+    // Loading & Layout
+    let rootLayout = { width: "auto", height: "auto" };
+    try {
+      const boxModel = await sendDebuggerCommand(tabId, "DOM.getBoxModel", { nodeId: rootNode.nodeId });
+      if (boxModel?.model) rootLayout = { width: boxModel.model.width, height: boxModel.model.height };
+    } catch (e) { }
+
+    const loadingComponent = `const Component = () => (<div className="flex flex-col items-center justify-center h-full p-8 text-slate-400"><div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div><div className="text-sm font-mono mt-4">AI Analyzing...</div></div>);`;
+
+    chrome.runtime.sendMessage({ type: "UPDATE_CODE_WITH_REAL_DATA", code: loadingComponent, layout: rootLayout }).catch(() => { });
+    sendResponse({ success: true, data: htmlOutput, layout: rootLayout });
+
+    let accumulatedText = "";
+    const mockPort = {
+      postMessage: (msg) => {
+        if (msg.type === "STREAM_CHUNK") accumulatedText += (msg.chunk || msg.text || "");
+        if (msg.type === "STREAM_DONE" || (msg.success && msg.data)) {
+          chrome.runtime.sendMessage({ type: "UPDATE_CODE_WITH_REAL_DATA", code: msg.data || accumulatedText, layout: rootLayout }).catch(() => { });
+        }
+      }
+    };
+
+    await handleGeminiTestStream({ styles: htmlOutput }, mockPort);
+
   } catch (error) {
     console.error("❌ CDP Error:", error);
     sendResponse({ success: false, error: error.message });
@@ -233,442 +334,398 @@ async function handleCdpGetTreeStyles(msg, sender, sendResponse) {
   }
 }
 
-async function captureTreeState(tabId, node) {
-  if (!node) return null;
-  if (node.nodeType === 3)
-    return node.nodeValue.trim()
-      ? { type: "text", content: node.nodeValue.trim() }
-      : null;
-  if (node.nodeType !== 1) return null;
+function mergeHoverDiff(baseNode, hoverNode) {
+  if (!baseNode || !hoverNode) return;
 
-  const tagName = node.nodeName.toLowerCase();
-  if (["script", "style", "noscript", "iframe", "comment"].includes(tagName))
-    return null;
+  if (baseNode.computedStyle && hoverNode.computedStyle) {
+    const diff = {};
+    const baseStyle = baseNode.computedStyle;
+    const hoverStyle = hoverNode.computedStyle;
+    let hasDiff = false;
+    const interactiveProps = ["color", "background-color", "border-color", "opacity", "transform", "box-shadow", "fill", "stroke"];
 
-  // 微小延时防丢包
-  await new Promise((r) => setTimeout(r, 2));
+    interactiveProps.forEach(prop => {
+      if (baseStyle[prop] !== hoverStyle[prop] && hoverStyle[prop]) {
+        diff[prop] = hoverStyle[prop];
+        hasDiff = true;
+      }
+    });
 
-  // 获取样式 (含 Inherited)
-  const styles = await fetchStylesForNode(tabId, node.nodeId);
-  if (!styles) return null;
-
-  const attrs = formatAttributes(node.attributes);
-
-  // SVG 处理 (V21 纯净版 - 无注入)
-  if (tagName === "svg") {
-    try {
-      const outerObj = await sendDebuggerCommand(tabId, "DOM.getOuterHTML", {
-        nodeId: node.nodeId,
-      });
-      let svgHtml = outerObj.outerHTML;
-
-      // 🔥 暴力清洗：只保留 viewBox, d, fill, xmlns
-      // 移除所有 style, class, width, height, stroke (让 Tailwind 控制)
-      svgHtml = svgHtml
-        .replace(/style="[^"]*"/gi, "")
-        .replace(/class="[^"]*"/gi, "")
-        .replace(/width="[^"]*"/gi, "")
-        .replace(/height="[^"]*"/gi, "")
-        .replace(/stroke="[^"]*"/gi, "") // 删掉原生的 stroke，防止干扰
-        .replace(/stroke-width="[^"]*"/gi, ""); // 删掉原生的 width
-
-      // 重新把必要的 Computed 尺寸加回去，作为一个干净的 style
-      const computed = styles.computedStyle;
-      let cleanStyle = `width:${computed.width || "1em"};height:${
-        computed.height || "1em"
-      };`;
-      // 颜色交给 AI 通过 class 处理，或者这里硬编码 currentColor
-
-      svgHtml = svgHtml.replace(
-        "<svg",
-        `<svg style="${cleanStyle}" fill="currentColor"`
-      );
-
-      return { type: "svg_raw", html: svgHtml, computedStyle: computed };
-    } catch (e) {
-      return null;
+    if (hasDiff) {
+      baseNode.hoverDiff = diff;
     }
   }
 
+  if (baseNode.children && hoverNode.children && baseNode.children.length === hoverNode.children.length) {
+    for (let i = 0; i < baseNode.children.length; i++) {
+      mergeHoverDiff(baseNode.children[i], hoverNode.children[i]);
+    }
+  }
+}
+
+function purifyCssText(cssText) {
+  if (!cssText) return "";
+  return cssText
+    .replace(/(margin|margin-top|margin-bottom|margin-left|margin-right)\s*:[^;]+;?/gi, '')
+    .replace(/(top|left|right|bottom)\s*:[^;]+;?/gi, '')
+    .replace(/(align|justify)-self\s*:[^;]+;?/gi, '');
+}
+
+async function captureTreeState(tabId, node, parentComputedStyle = null, isRoot = true, isHovering = false) {
+  if (!node) return null;
+  if (node.nodeType === 3) return node.nodeValue.trim() ? { type: "text", content: node.nodeValue.trim() } : null;
+  if (node.nodeType !== 1) return null;
+
+  const tagName = node.nodeName.toLowerCase();
+  if (["script", "style", "noscript", "iframe", "comment"].includes(tagName)) return null;
+
+  const styles = await fetchStylesForNode(tabId, node.nodeId, parentComputedStyle, isRoot);
+  if (!styles) return null;
+
+  let currentComputedStyle = styles.computedStyle;
+
+  if (isRoot) {
+    const layoutPollution = [
+      "margin", "margin-top", "margin-bottom", "margin-left", "margin-right",
+      "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
+      "top", "left", "right", "bottom", "inset",
+      "align-self", "justify-self", "flex", "grid-area"
+    ];
+    layoutPollution.forEach(k => delete currentComputedStyle[k]);
+
+    if (styles.matchedRules) {
+      styles.matchedRules = styles.matchedRules.map(rule => {
+        if (rule.type !== "Inherited" && rule.type !== "RootVars") {
+          return { ...rule, cssText: purifyCssText(rule.cssText) };
+        }
+        return rule;
+      });
+    }
+  }
+
+  if (tagName === "svg") {
+    try {
+      const outerObj = await sendDebuggerCommand(tabId, "DOM.getOuterHTML", { nodeId: node.nodeId });
+      let svgHtml = outerObj.outerHTML
+        .replace(/style="[^"]*"/gi, '')
+        .replace(/width="[^"]*"/gi, '')
+        .replace(/height="[^"]*"/gi, '');
+
+      let styleParts = [];
+      for (const [k, v] of Object.entries(currentComputedStyle)) {
+        if (!k.startsWith('font-') && !k.startsWith('line-') && !k.startsWith('text-')) {
+          styleParts.push(`${k}:${v}`);
+        }
+      }
+      if (currentComputedStyle.color && !styleParts.some(s => s.startsWith('color:'))) styleParts.push(`color:${currentComputedStyle.color}`);
+      if (currentComputedStyle.fill && !styleParts.some(s => s.startsWith('fill:'))) styleParts.push(`fill:${currentComputedStyle.fill}`);
+
+      const cleanStyle = styleParts.join(';');
+      return { type: "svg_raw", html: svgHtml.replace('<svg', `<svg style="${cleanStyle}"`), computedStyle: currentComputedStyle };
+    } catch (e) { return null; }
+  }
+
   const children = [];
+  if (node.pseudoElements) {
+    for (const pseudo of node.pseudoElements) {
+      const processed = await captureTreeState(tabId, pseudo, currentComputedStyle, false, isHovering);
+      // 🔥 V60.22 回滚：保留所有伪元素，不做人为过滤
+      if (processed) {
+        processed.isPseudo = true;
+        children.push(processed);
+      }
+    }
+  }
   if (node.children) {
     for (const child of node.children) {
-      const processed = await captureTreeState(tabId, child);
+      const processed = await captureTreeState(tabId, child, currentComputedStyle, false, isHovering);
       if (processed) children.push(processed);
     }
   }
 
+  const finalTagName = tagName.startsWith("::") ? "div" : tagName;
+  const finalAttributes = formatAttributes(node.attributes);
+  if (tagName.startsWith("::")) finalAttributes["data-pseudo"] = tagName.replace("::", "");
+
   return {
     type: "element",
-    tagName,
-    attributes: attrs,
-    computedStyle: styles.computedStyle,
+    tagName: finalTagName,
+    attributes: finalAttributes,
+    computedStyle: currentComputedStyle,
     matchedRules: styles.matchedRules,
-    children,
+    children
   };
 }
 
-// ==========================================
-// 辅助函数：从 CSS 文本中提取所有被引用的变量名 var(--xxx)
-// ==========================================
 function extractUsedVariables(cssText) {
   const vars = new Set();
-  // 匹配 var(--variable-name)
   const regex = /var\((--[a-zA-Z0-9-_]+)[^)]*\)/g;
   let match;
-  while ((match = regex.exec(cssText)) !== null) {
-    vars.add(match[1]);
-  }
+  while ((match = regex.exec(cssText)) !== null) vars.add(match[1]);
   return vars;
 }
 
-// ==========================================
-// 辅助函数：解析 CSS 文本为对象 (简化版)
-// 将 "color: red; width: 10px" 转换为 { color: "red", width: "10px" }
-// ==========================================
 function parseCssText(cssText) {
   const style = {};
   if (!cssText) return style;
-
-  // 去除注释
-  cssText = cssText.replace(/\/\*[\s\S]*?\*\//g, "");
-
-  const parts = cssText.split(";");
-  for (const part of parts) {
+  cssText.split(";").forEach(part => {
     const [key, ...valParts] = part.split(":");
-    if (key && valParts.length > 0) {
-      const propName = key.trim().toLowerCase();
-      style[propName] = valParts.join(":").trim();
-    }
-  }
+    if (key && valParts.length) style[key.trim().toLowerCase()] = valParts.join(":").trim();
+  });
   return style;
 }
 
-// ==========================================
-// 核心逻辑：获取并清洗样式
-// ==========================================
-async function fetchStylesForNode(tabId, nodeId) {
+async function fetchStylesForNode(tabId, nodeId, parentComputedStyle, isRoot = false) {
   const result = { computedStyle: {}, matchedRules: [] };
 
-  // 1. 获取 Computed Style (用于最终校验)
-  // ... (保持 V27.5 的清洗逻辑)
   try {
-    const computedResult = await sendDebuggerCommand(
-      tabId,
-      "CSS.getComputedStyleForNode",
-      { nodeId }
-    );
-    if (computedResult)
-      result.computedStyle = processComputedStyle(computedResult.computedStyle);
-  } catch (e) {
-    return null;
-  }
-
-  // 2. 获取原始 Matched Rules
-  try {
-    const matchedResult = await sendDebuggerCommand(
-      tabId,
-      "CSS.getMatchedStylesForNode",
-      { nodeId }
-    );
-
-    if (matchedResult) {
-      // A. 收集当前元素“自身”的所有规则
-      const ownRules = matchedResult.matchedCSSRules || [];
-      const ownCssText = ownRules.map((r) => r.rule.style.cssText).join(" ");
-      const inlineStyleText = matchedResult.inlineStyle
-        ? matchedResult.inlineStyle.cssText
-        : "";
-
-      // B. 分析“自身”用到了哪些变量
-      // 只有当前元素明确用到的变量，我们才去继承链里找定义
-      const usedVars = new Set([
-        ...extractUsedVariables(ownCssText),
-        ...extractUsedVariables(inlineStyleText),
-      ]);
-
-      // C. 分析“自身”定义了哪些属性 (用于判断覆盖)
-      const ownProperties = new Set();
-      [...ownRules].forEach((r) => {
-        const props = parseCssText(r.rule.style.cssText);
-        Object.keys(props).forEach((k) => ownProperties.add(k));
-      });
-      if (matchedResult.inlineStyle) {
-        const inlineProps = parseCssText(matchedResult.inlineStyle.cssText);
-        Object.keys(inlineProps).forEach((k) => ownProperties.add(k));
+    const computedResult = await sendDebuggerCommand(tabId, "CSS.getComputedStyleForNode", { nodeId });
+    if (computedResult) {
+      result.computedStyle = processComputedStyle(computedResult.computedStyle, parentComputedStyle, isRoot);
+      if (isRoot) {
+        const allVars = {};
+        computedResult.computedStyle.forEach(p => { if (p.name.startsWith('--')) allVars[p.name] = p.value; });
+        if (Object.keys(allVars).length > 0) {
+          result.matchedRules.push({ selector: ":root", cssText: Object.entries(allVars).map(([k, v]) => `${k}: ${v}`).join('; '), type: "RootVars" });
+        }
       }
+    }
+  } catch (e) { return null; }
 
-      // D. 组装最终规则列表
+  try {
+    const matchedResult = await sendDebuggerCommand(tabId, "CSS.getMatchedStylesForNode", { nodeId });
+    if (matchedResult) {
+      const ownRules = matchedResult.matchedCSSRules || [];
+      const ownCssText = ownRules.map(r => r.rule.style.cssText).join(" ");
+      const inlineStyleText = matchedResult.inlineStyle ? matchedResult.inlineStyle.cssText : "";
+      const usedVars = new Set([...extractUsedVariables(ownCssText), ...extractUsedVariables(inlineStyleText)]);
+      const ownProperties = new Set();
+
       const finalRules = [];
-
-      // D-1. 先放入自身的规则 (全部保留)
-      ownRules.forEach((r) => {
+      ownRules.forEach(r => {
         if (r.rule.origin !== "user-agent") {
-          finalRules.push({
-            selector: r.rule.selectorList.text,
-            cssText: r.rule.style.cssText,
-            type: "Own Rule",
-          });
+          finalRules.push({ selector: r.rule.selectorList.text, cssText: r.rule.style.cssText, type: "Own Rule" });
+          Object.keys(parseCssText(r.rule.style.cssText)).forEach(k => ownProperties.add(k));
         }
       });
 
-      // D-2. 处理继承规则 (Tree Shaking 核心!)
       if (matchedResult.inherited) {
-        matchedResult.inherited.forEach((entry) => {
-          if (!entry.matchedCSSRules) return;
-
-          entry.matchedCSSRules.forEach((r) => {
-            if (r.rule.origin === "user-agent") return;
-
-            const parentCssText = r.rule.style.cssText;
-            const parentProps = parseCssText(parentCssText);
-            let keepRule = false;
-            let cleanParentCss = [];
-
-            // 遍历父级规则的每一个属性
-            for (const [prop, val] of Object.entries(parentProps)) {
-              // 情况 1: 是 CSS 变量
-              if (prop.startsWith("--")) {
-                // 只有当这个变量被子元素(usedVars)引用时，才保留定义
-                if (usedVars.has(prop)) {
-                  cleanParentCss.push(`${prop}: ${val}`);
-                  keepRule = true;
+        matchedResult.inherited.forEach(entry => {
+          if (entry.matchedCSSRules) {
+            entry.matchedCSSRules.forEach(r => {
+              if (r.rule.origin === "user-agent") return;
+              const props = parseCssText(r.rule.style.cssText);
+              const clean = [];
+              for (const [k, v] of Object.entries(props)) {
+                if ((k.startsWith('--') && usedVars.has(k)) || (!k.startsWith('--') && !ownProperties.has(k))) {
+                  clean.push(`${k}:${v}`);
+                  if (!k.startsWith('--')) ownProperties.add(k);
                 }
               }
-              // 情况 2: 是普通属性 (如 color, font-family)
-              else {
-                // 只有当子元素没有重写这个属性时，才保留继承
-                // (注意：这里还可以更激进，对比 Computed Style，但目前先做属性名碰撞检测)
-                if (!ownProperties.has(prop)) {
-                  cleanParentCss.push(`${prop}: ${val}`);
-                  keepRule = true;
-                  // 这是一个被继承下来的有效属性，也算作子元素拥有的属性，
-                  // 防止更上层的祖先再次覆盖它 (CSS Cascading logic)
-                  ownProperties.add(prop);
-                }
-              }
-            }
-
-            // 只有当这条规则里至少有一个属性是有用的，才加入 Input
-            if (keepRule && cleanParentCss.length > 0) {
-              finalRules.push({
-                selector: r.rule.selectorList.text + " (Inherited)",
-                cssText: cleanParentCss.join("; "), // 只发送精简后的 CSS
-                type: "Inherited",
-              });
-            }
-          });
+              if (clean.length) finalRules.push({ selector: r.rule.selectorList.text + " (Inherited)", cssText: clean.join(';'), type: "Inherited" });
+            });
+          }
         });
       }
-
-      result.matchedRules = finalRules;
+      result.matchedRules = [...result.matchedRules, ...finalRules];
     }
-  } catch (e) {
-    console.warn("Rules fetch error", e);
-  }
+  } catch (e) { }
   return result;
 }
 
-// 序列化 (V30.0 逻辑分离版：Rules vs Vars)
-function serializeTreeToHTML(node) {
-  if (!node) return "";
-  if (node.type === "text") return node.content;
-  if (node.type === "svg_raw") return node.html;
+// ==========================================
+// 4. 核心序列化 (🔥 V2.0: 包含 URL 补全 + Base64 抽脂)
+// ==========================================
 
-  if (node.type === "element") {
-    const tagName = node.tagName;
-
-    // 1. 处理 Computed Style (保持 V18.3 逻辑)
-    const computedString = Object.entries(node.computedStyle || {})
-      .map(([k, v]) => `${k}:${v}`)
-      .join(";");
-
-    // 2. 🔥 V30.0 修改核心：规则分离 (Rule Separation) 🔥
-    // 我们不再生成一个巨大的 data-matched-rules，而是拆分为 data-rules (逻辑) 和 data-vars (变量定义)
-    let rulesAttr = "";
-    let varsAttr = "";
-
-    if (node.matchedRules && node.matchedRules.length > 0) {
-      let ownCss = "";
-      let inheritedVars = "";
-
-      node.matchedRules.forEach((r) => {
-        // 如果是继承规则 (来自 V28 fetchStylesForNode 的标记)
-        if (r.type === "Inherited") {
-          // 只提取 CSS 变量 (--variable: value)
-          // 过滤掉非变量的普通属性，节省 Token
-          const vars = r.cssText
-            .split(";")
-            .filter((s) => s.trim().startsWith("--"))
-            .join(";");
-
-          if (vars.trim()) {
-            inheritedVars += vars + "; ";
-          }
-        }
-        // 如果是自身的规则 (Own Rule)
-        else {
-          // 保留完整的选择器和内容 (用于 hover, active 等逻辑)
-          ownCss += `${r.selector} { ${r.cssText} } `;
-        }
-      });
-
-      // 组装属性字符串
-      if (ownCss.trim()) {
-        rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
-      }
-      if (inheritedVars.trim()) {
-        varsAttr = ` data-vars="${inheritedVars.replace(/"/g, "'").trim()}"`;
-      }
-    }
-
-    // 3. 处理常规属性 (保持 V18.3 逻辑 + Base64 防护)
-    let otherAttrs = "";
-    let originalStyle = "";
-
-    if (node.attributes) {
-      Object.entries(node.attributes).forEach(([key, value]) => {
-        // 跳过黑名单
-        if (key === "class" || key === "data-divmagic-id") return;
-
-        // 提取原生内联 style
-        if (key === "style") {
-          originalStyle = value;
-          return;
-        }
-
-        // 跳过事件监听
-        if (key.startsWith("on")) return;
-
-        // Base64 防护：截断超长属性
-        let safeValue = String(value);
-        if (safeValue.length > 500 && key !== "d") {
-          safeValue = safeValue.substring(0, 100) + "...[TRUNCATED]";
-        }
-
-        // 转义引号
-        safeValue = safeValue.replace(/"/g, "&quot;");
-        otherAttrs += ` ${key}="${safeValue}"`;
-      });
-    }
-
-    // 4. 组装最终标签
-    // 优先使用原生内联 style (originalStyle)，如果没有才用 Computed (computedString)
-    const finalStyle = originalStyle || computedString;
-
-    // 恢复 class 属性
-    const classAttr = node.attributes.class
-      ? `class="${node.attributes.class}"`
-      : "";
-
-    // 🔥 注意：这里我们要把 data-rules 和 data-vars 都拼进去
-    // data-computed-style 依然保留，作为兜底
-    let openTag = `<${tagName} ${classAttr} style="${finalStyle}" data-computed-style="${computedString}"${rulesAttr}${varsAttr}${otherAttrs}>`;
-
-    const childrenHTML = node.children
-      .map((child) => serializeTreeToHTML(child))
-      .join("");
-
-    return `${openTag}${childrenHTML}</${tagName}>`;
-  }
-  return "";
+function makeUrlAbsolute(path, baseUrl) {
+  if (!path) return path;
+  if (path.startsWith("data:") || path.startsWith("blob:") || path.startsWith("http")) return path;
+  if (path.startsWith("//")) return `https:${path}`;
+  try { return new URL(path, baseUrl).href; } catch (e) { return path; }
 }
 
-// Computed Style 全量清洗
-function processComputedStyle(cdpStyleArray, parentStyleObj = null) {
+/**
+ * ✂️ 新增辅助函数：Base64 截断器
+ * 如果字符串是 Base64 且超过 100 字符，直接截断，保留头部标记供 AI 识别
+ */
+function truncateBase64(value) {
+  if (!value || typeof value !== 'string') return value;
+
+  // 检查是否包含 data:image
+  if (value.includes("data:image")) {
+    // 如果长度超过 500 (通常 Base64 都几千几万)，才截断
+    if (value.length > 500) {
+      // 保留前 30 个字符让 AI 知道这是图片类型 (如 data:image/png;base64...)
+      return value.substring(0, 30) + "...[BASE64_IMAGE_DATA_TRUNCATED]...";
+    }
+  }
+  return value;
+}
+
+function serializeTreeToHTML(node, baseUrl) {
+  if (!node) return "";
+  if (node.type === "text") return node.content;
+
+  // 1. 处理 SVG Raw
+  if (node.type === "svg_raw") {
+    let html = node.html;
+    if (baseUrl) {
+      html = html.replace(/(href|src)="([^"]+)"/g, (match, attr, val) => `${attr}="${makeUrlAbsolute(val, baseUrl)}"`);
+    }
+    return html;
+  }
+
+  const tagName = node.tagName;
+
+  // 2. 处理 Computed Style (修复背景图里的 Base64)
+  const computedString = Object.entries(node.computedStyle || {}).map(([k, v]) => {
+    // A. 修复相对路径 URL
+    if (baseUrl && v && v.includes('url(') && !v.includes('data:')) {
+      v = v.replace(/url\(['"]?(.+?)['"]?\)/g, (match, url) => `url('${makeUrlAbsolute(url, baseUrl)}')`);
+    }
+    // B. 🔥 核心：截断背景图里的 Base64
+    if (v && v.includes('data:image')) {
+      // 正则匹配 url('data:...') 并截断内容
+      v = v.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, (match, dataContent) => {
+        return `url('${truncateBase64(dataContent)}')`;
+      });
+    }
+    return `${k}:${v}`;
+  }).join(";");
+
+  let hoverDiffAttr = "";
+  if (node.hoverDiff) {
+    const diffString = Object.entries(node.hoverDiff).map(([k, v]) => `${k}:${v}`).join(";");
+    hoverDiffAttr = ` data-hover-diff="${diffString}"`;
+  }
+
+  // 🔥 优化：彻底移除 data-rules 和 data-vars，AI 只依赖 Computed Style 还原视觉
+  let rulesAttr = "";
+  /*
+  if (node.matchedRules) {
+    let ownCss = "";
+    node.matchedRules.forEach(r => {
+      if (r.type !== "Inherited") {
+        let safeCss = r.cssText;
+        if (safeCss.includes('data:image')) {
+          safeCss = safeCss.replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
+        }
+        ownCss += `${r.selector} { ${safeCss} } `;
+      }
+    });
+    if (ownCss) rulesAttr = ` data-rules="${ownCss.replace(/"/g, "'").trim()}"`;
+  }
+  */
+
+  let otherAttrs = "";
+  if (node.attributes) {
+    Object.entries(node.attributes).forEach(([key, value]) => {
+      // 移除 class 和其他冗余属性
+      if (key === "class" || key === "data-divmagic-id" || key === "style" || key.startsWith("on")) return;
+
+      let finalValue = value;
+
+      // 3. 处理属性
+      if (baseUrl && (key === "src" || key === "href")) {
+        finalValue = makeUrlAbsolute(value, baseUrl);
+      }
+      if (baseUrl && key === "srcset") {
+        finalValue = value.split(',').map(part => {
+          const [url, desc] = part.trim().split(' ');
+          return `${makeUrlAbsolute(url, baseUrl)} ${desc || ''}`.trim();
+        }).join(', ');
+      }
+
+      // 🔥 核心：截断 src 或 srcset 里的 Base64
+      finalValue = truncateBase64(finalValue);
+
+      // 处理行内 style 属性里的 Base64
+      if (key === "style" && String(finalValue).includes('data:image')) {
+        finalValue = String(finalValue).replace(/url\(['"]?(data:image[^'"]+)['"]?\)/g, "url('...BASE64_TRUNCATED...')");
+      }
+
+      otherAttrs += ` ${key}="${String(finalValue).replace(/"/g, "&quot;")}"`;
+    });
+  }
+
+  // const classAttr = node.attributes.class ? `class="${node.attributes.class}"` : ""; // 移除 class
+  const childrenHtml = node.children.map(child => serializeTreeToHTML(child, baseUrl)).join('');
+
+  // 这里的 style 属性已经是清洗过的 computedString，非常干净
+  return `<${tagName} style="${computedString}"${hoverDiffAttr}${otherAttrs}>${childrenHtml}</${tagName}>`;
+}
+
+function processComputedStyle(cdpArray, parentObj = null, isRoot = false) {
   const styleObj = {};
 
-  // 🗑️ 垃圾过滤器
-  const isGarbage = (name, value) => {
-    // 🔥🔥🔥 核心修复：在这里！🔥🔥🔥
-    // 凡是以 -- 开头的 CSS 变量，在 Computed Style 里一律杀无赦。
-    // 理由：变量的定义已经在 data-vars 里了，这里只需要最终的像素值。
-    if (name.startsWith("--")) return true;
+  // 🛑 精准黑名单：只屏蔽日志里出现的那些毫无意义的浏览器默认值
+  const blockList = new Set([
+    // 1. 逻辑属性 (Logical Properties) - Tailwind 主要使用物理属性，这些是冗余的
+    "block-size", "min-block-size", "max-block-size",
+    "inline-size", "min-inline-size", "max-inline-size",
+    "border-block-end-color", "border-block-end-style", "border-block-end-width",
+    "border-block-start-color", "border-block-start-style", "border-block-start-width",
+    "border-inline-end-color", "border-inline-end-style", "border-inline-end-width",
+    "border-inline-start-color", "border-inline-start-style", "border-inline-start-width",
+    "border-block-color", "border-block-style", "border-block-width",
+    "border-inline-color", "border-inline-style", "border-inline-width",
+    "margin-block-end", "margin-block-start", "margin-inline-end", "margin-inline-start",
+    "padding-block-end", "padding-block-start", "padding-inline-end", "padding-inline-start",
+    "inset-block-end", "inset-block-start", "inset-inline-end", "inset-inline-start",
+    "overflow-block", "overflow-inline", "overscroll-behavior-block", "overscroll-behavior-inline",
+    
+    // 2. 渲染引擎内部默认值 / 极少使用的属性
+    "animation-composition", "animation-play-state", "animation-range-end", "animation-range-start", "animation-timeline",
+    "background-blend-mode", "background-origin", "buffered-rendering", "break-after", "break-before", "break-inside",
+    "color-interpolation", "color-interpolation-filters", "color-rendering", "clip-rule", "caret-color", "column-fill", "column-rule-color", "column-rule-width",
+    "font-feature-settings", "font-language-override", "font-optical-sizing", "font-palette", "font-kerning", "font-variation-settings",
+    "font-synthesis", "font-variant", "font-variant-alternates", "font-variant-caps", "font-variant-east-asian",
+    "font-variant-emoji", "font-variant-ligatures", "font-variant-numeric", "font-variant-position", 
+    "forced-color-adjust", "grid-auto-columns", "grid-auto-rows", "hyphens", "hyphenate-limit-chars",
+    "image-orientation", "image-rendering", "isolation", "interpolate-size",
+    "line-break", "math-depth", "math-style", "mask-type", "mix-blend-mode", "marker", "mask-clip", "mask-composite", "mask-mode", "mask-origin", "mask-repeat",
+    "object-position", "offset-distance", "offset-rotate", "offset-path",
+    "overflow-anchor", "overflow-clip-margin", "overlay", "paint-order", "perspective", "perspective-origin",
+    "r", "rx", "ry", "ruby-position", "ruby-align", // SVG 半径等默认值
+    "scroll-behavior", "scroll-margin", "scroll-margin-block", "scroll-margin-inline", "scroll-margin-bottom", "scroll-margin-top", "scroll-margin-left", "scroll-margin-right",
+    "scroll-padding", "scroll-padding-block", "scroll-padding-inline", "scroll-padding-bottom", "scroll-padding-top", "scroll-padding-left", "scroll-padding-right",
+    "scroll-snap-align", "scroll-snap-stop", "scroll-snap-type", "scroll-timeline-axis",
+    "shape-image-threshold", "shape-margin", "shape-outside", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stop-color", "stop-opacity",
+    "text-decoration-skip-ink", "text-decoration-style", "text-decoration-color", "text-emphasis-color", "text-emphasis-position", "text-orientation", "text-rendering", "text-size-adjust", "text-spacing-trim", "touch-action", "text-anchor", "text-wrap-mode",
+    "vector-effect", "writing-mode", "widows", "will-change", "white-space-collapse",
+    "zoom",
 
-    // 原有的黑名单逻辑
-    if (
-      name.startsWith("-webkit-") ||
-      name.startsWith("-moz-") ||
-      name.startsWith("-ms-")
-    )
-      return true;
-
-    // 原有的省流逻辑
-    if (
-      value === "auto" ||
-      value === "normal" ||
-      value === "none" ||
-      value === "0px"
-    )
-      return true;
-    if (value === "rgba(0, 0, 0, 0)" || value === "transparent") return true;
-    if (value === "repeat" || value === "scroll") return true;
-    if (
-      name.includes("animation") ||
-      name.includes("transition") ||
-      name.includes("mask") ||
-      name.includes("break")
-    )
-      return false;
-
-    return false;
-  };
-
-  // 🌟 必须保留的布局属性 (白名单)
-  const mustKeep = new Set([
-    "display",
-    "position",
-    "width",
-    "height",
-    "top",
-    "left",
-    "bottom",
-    "right",
-    "z-index",
-    "opacity",
-    "transform",
-    "margin",
-    "padding",
+    // 3. Webkit 前缀垃圾
+    "-webkit-font-smoothing", "-webkit-locale", "-webkit-text-orientation", "-webkit-writing-mode", "-webkit-ruby-position", "-webkit-text-fill-color", "-webkit-tap-highlight-color", "-webkit-print-color-adjust", "-webkit-text-stroke", "-webkit-text-stroke-color", "-webkit-text-stroke-width", "-webkit-text-security", "-webkit-user-drag", "-webkit-user-modify"
   ]);
 
-  // V29 的数值精度处理
-  const roundValue = (value) => {
-    if (typeof value !== "string") return value;
-    return value.replace(/(\d+\.\d{2})\d+/g, "$1"); // 保留2位小数
-  };
+  cdpArray.forEach(p => {
+    const k = p.name;
+    const v = p.value;
 
-  // V29 的可继承属性列表 (用于 Diff)
-  const INHERITABLE_PROPS = new Set([
-    "color",
-    "font-family",
-    "font-size",
-    "font-weight",
-    "font-style",
-    "line-height",
-    "letter-spacing",
-    "text-align",
-    "visibility",
-    "cursor",
-    "fill",
-    "stroke",
-  ]);
+    // 1. 黑名单拦截
+    if (blockList.has(k)) return;
+    if (k.startsWith("-webkit-") && !k.includes("line-clamp")) return; // 只保留 line-clamp
 
-  cdpStyleArray.forEach((p) => {
-    const name = p.name;
-    const rawValue = p.value;
-    const cleanValue = roundValue(rawValue);
-
-    // 1. 执行垃圾过滤 (含变量过滤)
-    if (!mustKeep.has(name) && isGarbage(name, cleanValue)) return;
-
-    // 2. 执行继承 Diff (如果和父级一样，就不发)
-    if (parentStyleObj && INHERITABLE_PROPS.has(name)) {
-      if (parentStyleObj[name] === cleanValue) {
-        return; // 丢弃重复的继承值
-      }
+    // 2. 默认值过滤 (扩充)
+    // 这里我们做得保守一点，只过滤绝对安全的默认值
+    if (v === "auto" || v === "none" || v === "normal" || v === "0px" || v === "rgba(0, 0, 0, 0)" || v === "transparent" || v === "initial" || v === "static" || v === "0" || v === "0%" || v === "repeat" || v === "scroll" || v === "start" || v === "middle") {
+      if (v === "0px" && (k.includes("border-width") || k.includes("outline-width") || k.includes("margin") || k.includes("padding") || k.includes("left") || k.includes("right") || k.includes("top") || k.includes("bottom"))) return; 
+      if (v === "none" && !["display", "max-width", "max-height", "text-decoration"].includes(k)) return;
+      if (v === "auto" && !["width", "height", "overflow", "z-index", "cursor"].includes(k)) return; // cursor: auto 有时需要
+      if (v === "static" && k === "position") return;
+      if (v === "normal" && !["line-height", "font-weight"].includes(k)) return; 
+      if (v === "rgba(0, 0, 0, 0)" && (k === "background-color" || k === "color")) return;
+      if (v === "repeat" && k.includes("background-repeat")) return;
+      if (v === "scroll" && k.includes("background-attachment")) return;
+      if (v === "start" && (k === "text-align" || k === "justify-content" || k === "align-items")) return; // flex 默认可能是 row/start，视情况而定，但通常 start 是默认
     }
 
-    styleObj[name] = cleanValue;
+
+    // 3. 继承值过滤 (必须保留，这是压缩的大头)
+    if (parentObj && parentObj[k] === v) return;
+
+    styleObj[k] = v;
   });
 
   return styleObj;
@@ -684,11 +741,7 @@ function formatAttributes(attrs) {
 function findNodeByAttributeValue(node, attrName, attrValue) {
   if (node.nodeType === 1 && node.attributes) {
     for (let i = 0; i < node.attributes.length; i += 2) {
-      if (
-        node.attributes[i] === attrName &&
-        node.attributes[i + 1] === attrValue
-      )
-        return node;
+      if (node.attributes[i] === attrName && node.attributes[i + 1] === attrValue) return node;
     }
   }
   if (node.children) {
@@ -706,12 +759,8 @@ async function sendDebuggerCommand(tabId, method, params) {
 
 async function cleanupDebugging(tabId) {
   if (debuggingTabs.has(tabId)) {
-    try {
-      await chrome.debugger.detach({ tabId });
-    } catch (e) {
-    } finally {
-      debuggingTabs.delete(tabId);
-    }
+    try { await chrome.debugger.detach({ tabId }); } catch (e) { }
+    debuggingTabs.delete(tabId);
   }
 }
 chrome.tabs.onRemoved.addListener(cleanupDebugging);

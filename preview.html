@@ -1,135 +1,373 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Preview Sandbox</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        theme: { extend: { colors: { clifford: "#da373d" } } },
-      };
-    </script>
 
-    <script
-      crossorigin
-      src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script
-      crossorigin
-      src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Preview Sandbox</title>
 
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="lib/tailwindcss.js"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: { clifford: "#da373d" } } } };
+  </script>
 
-    <style>
-      body {
-        margin: 0;
-        padding: 0;
-        min-height: 100vh;
-        background-color: #ffffff;
+  <script src="lib/react.development.js"></script>
+  <script src="lib/react-dom.development.js"></script>
+  <script src="lib/babel.min.js"></script>
+  <script src="html-to-image.js"></script>
+
+  <style>
+    /* 全局布局：让画布居中 */
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    body {
+      padding: 40px;
+      /* 给拖拽留出空间 */
+      background-color: #f8fafc;
+      /* 🔥 关键布局：允许内容撑开容器，实现横向滚动 */
+      display: flex;
+      align-items: flex-start;
+      justify-content: flex-start;
+      overflow: auto;
+      box-sizing: border-box;
+    }
+
+    /* 核心容器 */
+    #root {
+      box-sizing: content-box;
+      /* 初始默认值，会被 JS 覆盖 */
+      min-width: 20px;
+
+      /* 🔥 核心：高度完全由内容决定，不可手动调整 */
+      height: auto !important;
+      min-height: auto !important;
+
+      /* 🔥 核心：自动居中魔法 (在 Flex 容器中) */
+      margin: auto;
+      /* 🔥 核心：防止父级挤压 */
+      flex-shrink: 0;
+
+      position: relative;
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      user-select: none;
+      transition: none;
+    }
+
+    /* Edit Mode */
+    .edit-mode-active .editable-text {
+      outline: 2px dashed #3b82f6 !important;
+      cursor: text !important;
+    }
+
+    .edit-mode-active .editable-text:hover {
+      background: rgba(59, 130, 246, 0.1);
+    }
+
+    .edit-mode-active a {
+      cursor: text !important;
+      pointer-events: none;
+    }
+
+    /* Loading Overlay */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(4px);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    #loading-overlay.active {
+      display: flex;
+    }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #e2e8f0;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .loading-text {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 500;
+      font-family: sans-serif;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
       }
-      #root {
-        width: 100%;
-        min-height: 100vh;
-      }
-      .error-box {
-        padding: 1rem;
-        background-color: #fee2e2;
-        color: #b91c1c;
-        border: 1px solid #f87171;
-        border-radius: 0.5rem;
-        margin: 1rem;
-        font-family: monospace;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
+    }
 
-    <script>
-      const rootElement = document.getElementById("root");
-      let reactRoot = null;
+    .error-box {
+      padding: 1rem;
+      background-color: #fee2e2;
+      color: #b91c1c;
+      border: 1px solid #f87171;
+      border-radius: 0.5rem;
+      margin: 1rem;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+  </style>
+</head>
 
-      // 🔥 关键修复 1: 把 React 的所有 Hook 注入到全局
-      // 这样用户代码里的 useState() 就能直接运行，而不需要写 React.useState()
-      if (window.React) {
-        Object.keys(window.React).forEach((key) => {
-          window[key] = window.React[key];
-        });
+<body>
+
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">AI is coding...</div>
+  </div>
+
+  <div id="root"></div>
+
+  <script>
+    const rootElement = document.getElementById("root");
+    let reactRoot = null;
+    let isEditMode = false;
+
+    // ==========================================
+    // 1. 拖拽逻辑 (仅允许调整宽度)
+    // ==========================================
+    const BORDER_SIZE = 12;
+    let isResizing = false;
+    // 不需要 currentResizer 变量了，因为只有一种模式：右侧拖拽
+
+    // 辅助：停止拖拽
+    function stopDrag() {
+      if (isResizing) {
+        isResizing = false;
+        rootElement.style.cursor = "default";
+        document.body.style.cursor = "default";
+      }
+    }
+
+    document.addEventListener("mousemove", (e) => {
+      if (isResizing) {
+        handleDrag(e);
+      } else {
+        if (!isEditMode) handleHover(e);
+      }
+    });
+
+    document.addEventListener("mousedown", (e) => {
+      // 只有当鼠标样式变为 ew-resize 时才允许拖拽
+      if (rootElement.style.cursor === "ew-resize" && !isEditMode) {
+        isResizing = true;
+        e.preventDefault();
+        document.body.style.cursor = "ew-resize";
+      }
+    });
+
+    // 🔥 核心修复：多重保险防止粘滞
+    document.addEventListener("mouseup", stopDrag);
+    document.addEventListener("mouseleave", stopDrag);
+    window.addEventListener("blur", stopDrag);
+
+    function handleHover(e) {
+      const rect = rootElement.getBoundingClientRect();
+      const x = e.clientX;
+      const y = e.clientY;
+
+      // 仅检测右边缘
+      const onRightEdge = x >= rect.right - BORDER_SIZE && x <= rect.right + BORDER_SIZE && y >= rect.top && y <= rect.bottom;
+
+      if (onRightEdge) {
+        rootElement.style.cursor = "ew-resize";
+      } else {
+        rootElement.style.cursor = "default";
+      }
+    }
+
+    function handleDrag(e) {
+      const rect = rootElement.getBoundingClientRect();
+      // 计算新宽度：鼠标当前X - 元素左侧X
+      const newWidth = e.clientX - rect.left;
+      if (newWidth > 50) {
+        rootElement.style.width = `${newWidth}px`;
+      }
+    }
+
+    // ==========================================
+    // 2. 消息通信与渲染逻辑
+    // ==========================================
+    window.addEventListener("message", (event) => {
+      const { type, code, layout, key, value, color, enable } = event.data;
+
+      if (type === "SHOW_LOADING") {
+        document.getElementById("loading-overlay").classList.add("active");
+        if (reactRoot) {
+          reactRoot.unmount();
+          reactRoot = null;
+        }
+        rootElement.innerHTML = "";
       }
 
-      window.addEventListener("message", (event) => {
-        const { type, code } = event.data;
-        if (type === "RENDER") {
-          // 这里加一个简单的防抖或延迟，确保 Babel 加载完成
-          if (typeof Babel === "undefined") {
-            setTimeout(() => window.postMessage(event.data, "*"), 100);
-            return;
+      if (type === "RENDER") {
+        document.getElementById("loading-overlay").classList.remove("active");
+        applyLayout(layout);
+        renderCode(code);
+      }
+
+      if (type === "UPDATE_STYLE") {
+        if (key === "fontFamily") loadGoogleFont(value);
+        document.getElementById("root").style.setProperty(key, value);
+      }
+
+      if (type === "UPDATE_CANVAS_BG") document.body.style.backgroundColor = color;
+      if (type === "TOGGLE_EDIT_MODE") toggleEditMode(enable);
+      if (type === "GET_SCREENSHOT") captureScreenshot();
+    });
+
+    function renderCode(rawCode) {
+      try {
+        let code = rawCode.replace(/import\s+.*?from\s+['"].*?['"];?/g, "").replace(/export\s+default\s+/g, "");
+        if (code.trim().startsWith("<")) code = `const Component = () => (\n${code}\n);`;
+
+        const codeToRun = `
+          const { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect, useReducer, useContext, createContext } = React;
+          const { Check, X, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Menu, Search, User, ShoppingCart, Bell, Settings, ArrowRight, ArrowLeft, Plus, Minus, Trash, Edit, Save, Upload, Download, ExternalLink, Link, Copy, Share, Info, AlertCircle, AlertTriangle, CheckCircle, HelpCircle, Loader, RefreshCw, XCircle } = window.LucideIcons || {};
+          
+          ${code}
+          let Target = null;
+          try { if (typeof Component !== 'undefined') Target = Component; } catch(e){}
+          try { if (typeof App !== 'undefined') Target = App; } catch(e){}
+          Target;
+        `;
+
+        const compiled = Babel.transform(codeToRun, { presets: ["react"] }).code;
+        const Component = eval(compiled);
+
+        if (!reactRoot) reactRoot = ReactDOM.createRoot(rootElement);
+        reactRoot.render(React.createElement(Component));
+      } catch (err) {
+        console.error(err);
+        document.getElementById("loading-overlay").classList.remove("active");
+        rootElement.innerHTML = `<div class="error-box">Render Error: ${err.message}</div>`;
+      }
+    }
+
+    // 布局应用：初始化时仅设置宽度
+    function applyLayout(layout) {
+      if (layout && layout.width && layout.width !== "auto") {
+        rootElement.style.width = `${layout.width}px`;
+      } else {
+        rootElement.style.width = "auto";
+      }
+      // 高度始终由内容自动撑开，不再设置 minHeight
+      rootElement.style.height = "auto";
+    }
+
+    function loadGoogleFont(fontName) {
+      if (!fontName) return;
+      const cleanName = fontName.split(',')[0].replace(/['"]/g, '').trim();
+      if (["serif", "sans-serif", "monospace", "cursive"].includes(cleanName.toLowerCase())) return;
+      const id = `font-${cleanName.replace(/\s+/g, '-')}`;
+      if (document.getElementById(id)) return;
+      const link = document.createElement('link');
+      link.id = id; link.rel = 'stylesheet';
+      link.href = `https://fonts.googleapis.com/css2?family=${cleanName.replace(/\s+/g, '+')}:wght@400;500;700&display=swap`;
+      document.head.appendChild(link);
+    }
+
+    // 🔥 核心修复 V60.25: 截图逻辑
+    async function captureScreenshot() {
+      const root = document.getElementById("root");
+      if (!root) return;
+
+      const originalTransform = root.style.transform;
+      root.style.transform = "none";
+      const originalBorder = root.style.border;
+      root.style.border = "none";
+
+      const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+      try {
+        const dataUrl = await htmlToImage.toPng(root, {
+          quality: 0.95,
+          pixelRatio: 2,
+          cacheBust: false,
+          skipOnError: true,
+          useCORS: true,
+          imagePlaceholder: placeholder,
+          filter: (node) => {
+            return node.tagName !== 'LINK' && node.tagName !== 'SCRIPT';
           }
-          renderCode(code);
+        });
+
+        root.style.transform = originalTransform;
+        root.style.border = originalBorder;
+
+        window.parent.postMessage({ type: "SCREENSHOT_RESULT", dataUrl }, "*");
+
+      } catch (error) {
+        console.error("Capture failed:", error);
+        root.style.transform = originalTransform;
+        root.style.border = originalBorder;
+        window.parent.postMessage({ type: "SCREENSHOT_RESULT", dataUrl: null }, "*");
+      }
+    }
+
+    function toggleEditMode(enable) {
+      isEditMode = enable;
+      document.body.classList.toggle("edit-mode-active", enable);
+      const root = document.getElementById("root");
+      if (enable) wrapTextNodes(root);
+      else unwrapTextNodes(root);
+    }
+
+    function wrapTextNodes(el) {
+      Array.from(el.childNodes).forEach(node => {
+        if (node.nodeType === 3 && node.nodeValue.trim().length > 0) {
+          const span = document.createElement('span');
+          span.contentEditable = "true"; span.className = "editable-text";
+          span.onclick = e => { e.preventDefault(); e.stopPropagation(); };
+          span.setAttribute("data-original-text", node.nodeValue);
+          node.parentNode.insertBefore(span, node);
+          span.appendChild(node);
+        } else if (node.nodeType === 1 && !node.classList.contains('editable-text')) {
+          wrapTextNodes(node);
         }
       });
+    }
 
-      function renderCode(rawCode) {
-        try {
-          // 清除旧错误
-          // rootElement.innerHTML = ""; // 这一行先注释掉，让 React 自己处理重绘
+    function unwrapTextNodes(root) {
+      root.querySelectorAll('.editable-text').forEach(span => {
+        while (span.firstChild) span.parentNode.insertBefore(span.firstChild, span);
+        span.parentNode.removeChild(span);
+      });
+      root.normalize();
+    }
 
-          // 1. 代码清洗
-          let processedCode = rawCode
-            .replace(/import\s+.*?from\s+['"].*?['"];?/g, "") // 删 import
-            .replace(/export\s+default\s+/g, ""); // 删 export default
-
-          // 2. 智能修正：确保组件有名字
-          // 很多时候 AI 写 const ProductFeatureCard = ... 我们需要捕获这个名字
-          // 或者如果是 function App() ...
-
-          // 我们构建一个包裹脚本，不仅执行代码，还负责把组件挂载出来
-          // 🔥 关键修复 2: 不再让 eval 返回组件，而是让 eval 内部直接定义变量
-          const codeToRun = `
-            // 运行用户的代码
-            ${processedCode}
-
-            // --- 下面是自动查找组件的逻辑 ---
-            // 优先级：App > ProductFeatureCard > 第一个找到的函数组件
-            let TargetComponent = null;
-
-            if (typeof App !== 'undefined') TargetComponent = App;
-            else if (typeof ProductFeatureCard !== 'undefined') TargetComponent = ProductFeatureCard;
-            else if (typeof Component !== 'undefined') TargetComponent = Component;
-            else {
-                // 此时代码已经执行，尝试找任何可能的组件名
-                // 这里我们假设 AI 通常会用这几个名字，如果没有，后续可以加更复杂的遍历 window 逻辑
-            }
-            
-            TargetComponent; // 返回给 eval
-          `;
-
-          // 3. Babel 编译
-          const compiledCode = Babel.transform(codeToRun, {
-            presets: ["react"],
-          }).code;
-
-          // 4. 执行并获取组件
-          const Component = eval(compiledCode);
-
-          if (!Component) {
-            throw new Error(
-              "无法找到可渲染的组件。请确保代码中定义了 'App' 或 'ProductFeatureCard' 组件。"
-            );
-          }
-
-          // 5. 挂载 React
-          if (!reactRoot) {
-            reactRoot = ReactDOM.createRoot(rootElement);
-          }
-          reactRoot.render(React.createElement(Component));
-        } catch (err) {
-          console.error("Preview Render Error:", err);
-          rootElement.innerHTML = `<div class="error-box"><strong>渲染错误:</strong><br/>${err.message}<br/><br/>(请检查控制台获取详细堆栈)</div>`;
+    document.addEventListener("focusout", (e) => {
+      if (!isEditMode) return;
+      if (e.target.classList.contains("editable-text")) {
+        const oldText = e.target.getAttribute("data-original-text");
+        const newText = e.target.innerText;
+        if (oldText && newText !== oldText) {
+          e.target.setAttribute("data-original-text", newText);
+          window.top.postMessage({ type: "UPDATE_TEXT_CONTENT", oldText, newText }, "*");
         }
       }
-    </script>
-  </body>
+    });
+  </script>
+</body>
+
 </html>
